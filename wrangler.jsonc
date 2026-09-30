@@ -1,0 +1,29 @@
+{
+  "name": "code-market-builder",
+  "account_id": "2a3ba77f5940f33d1c239fdff0a34f3c",
+  "main": "cloudflare/worker.ts",
+  "compatibility_date": "2026-09-30",
+  "workers_dev": true,
+  "containers": [
+    {
+      "class_name": "CodeMarketContainer",
+      "image": "./Dockerfile",
+      "max_instances": 1,
+      "instance_type": "standard-1"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CODE_MARKET",
+        "class_name": "CodeMarketContainer"
+      }
+    ]
+  },
+  "exports": {
+    "CodeMarketContainer": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  }
+}

@@ -20,7 +20,7 @@ import {
   BsFolder2Open,
   SiJavascript, 
   SiReact, 
-  SiCss3, 
+  SiCss, 
   SiJson 
 } from '@/lib/icons';
 import { motion } from 'framer-motion';
@@ -1598,7 +1598,7 @@ Tip: I automatically detect and install npm packages from your code imports (lik
               ref={iframeRef}
               src={sandboxData.url}
               className="w-full h-full border-none"
-              title="Open Lovable Sandbox"
+              title="Code Market Sandbox"
               allow="clipboard-write"
               sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
             />
@@ -2243,7 +2243,7 @@ Tip: I automatically detect and install npm packages from your code imports (lik
     } else if (ext === 'tsx' || ext === 'ts') {
       return <SiReact style={{ width: '16px', height: '16px' }} className="text-blue-500" />;
     } else if (ext === 'css') {
-      return <SiCss3 style={{ width: '16px', height: '16px' }} className="text-blue-500" />;
+      return <SiCss style={{ width: '16px', height: '16px' }} className="text-blue-500" />;
     } else if (ext === 'json') {
       return <SiJson style={{ width: '16px', height: '16px' }} className="text-gray-600" />;
     } else {
