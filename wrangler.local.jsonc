@@ -1,0 +1,59 @@
+{
+  "name": "code-market-builder-local",
+  "main": "cloudflare/worker-local.ts",
+  "compatibility_date": "2026-09-30",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "vars": {
+    "CLOUDFLARE_SANDBOX_PUBLIC_URL": "http://127.0.0.1:8787",
+    "LAUNCH_ORCHESTRATOR_V2_ENABLED": "true",
+    "LAUNCH_BUILDER_ORIGIN": "http://127.0.0.1:3000"
+  },
+  "containers": [
+    {
+      "class_name": "CodeSandbox",
+      "scheduling_policy": "durable_object",
+      "images": {
+        "workspace": {
+          "dockerfile": "./cloudflare/sandbox.Dockerfile"
+        }
+      }
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CODE_SANDBOX",
+        "class_name": "CodeSandbox"
+      },
+      // ─── Ariadne's Thread [AT-0030] ─────────────────────
+      // What: Add local durable storage for launch coordinator tests
+      // Why:  Crash/resume and idempotency behavior must match the production Worker contract
+      // Date: 2026-09-30
+      // Related: [AT-0029] infra→cloudflare/worker-local.ts:fetch, [AT-0028] infra→wrangler.jsonc:LAUNCH_RUN
+      // ─────────────────────────────────────────────────────
+      {
+        "name": "LAUNCH_RUN",
+        "class_name": "LaunchRun"
+      },
+      {
+        "name": "BUILDER_PROMPTS",
+        "class_name": "BuilderPromptStore"
+      }
+    ]
+  },
+  "exports": {
+    "CodeSandbox": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "LaunchRun": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "BuilderPromptStore": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  }
+}

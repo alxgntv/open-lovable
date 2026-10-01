@@ -3,13 +3,39 @@
   "account_id": "2a3ba77f5940f33d1c239fdff0a34f3c",
   "main": "cloudflare/worker.ts",
   "compatibility_date": "2026-09-30",
+  "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
+  // ─── Ariadne's Thread [AT-0067] ─────────────────────
+  // What: Publish the production builder on builder.code.market
+  // Why:  Generated previews and internal callbacks must use the requested first-party hostname
+  // Date: 2026-09-30
+  // Related: [AT-0027] infra→cloudflare/worker.ts:fetch, [AT-0043] backend→lib/launch/worker-client.ts:launchWorkerFetch
+  // ─────────────────────────────────────────────────────
+  "routes": [
+    {
+      "pattern": "builder.code.market",
+      "custom_domain": true
+    }
+  ],
+  "vars": {
+    "CLOUDFLARE_SANDBOX_PUBLIC_URL": "https://builder.code.market",
+    "LAUNCH_ORCHESTRATOR_V2_ENABLED": "true"
+  },
   "containers": [
     {
       "class_name": "CodeMarketContainer",
       "image": "./Dockerfile",
       "max_instances": 1,
       "instance_type": "standard-1"
+    },
+    {
+      "class_name": "CodeSandbox",
+      "scheduling_policy": "durable_object",
+      "images": {
+        "workspace": {
+          "dockerfile": "./cloudflare/sandbox.Dockerfile"
+        }
+      }
     }
   ],
   "durable_objects": {
@@ -17,11 +43,41 @@
       {
         "name": "CODE_MARKET",
         "class_name": "CodeMarketContainer"
+      },
+      {
+        "name": "CODE_SANDBOX",
+        "class_name": "CodeSandbox"
+      },
+      // ─── Ariadne's Thread [AT-0028] ─────────────────────
+      // What: Bind one durable launch coordinator per run
+      // Why:  Checkpoints, idempotency records, and preview promotion must survive Worker restarts
+      // Date: 2026-09-30
+      // Related: [AT-0025] infra→cloudflare/launch-run.ts:LaunchRun, [AT-0027] infra→cloudflare/worker.ts:fetch
+      // ─────────────────────────────────────────────────────
+      {
+        "name": "LAUNCH_RUN",
+        "class_name": "LaunchRun"
+      },
+      {
+        "name": "BUILDER_PROMPTS",
+        "class_name": "BuilderPromptStore"
       }
     ]
   },
   "exports": {
     "CodeMarketContainer": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "CodeSandbox": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "LaunchRun": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "BuilderPromptStore": {
       "type": "durable-object",
       "storage": "sqlite"
     }

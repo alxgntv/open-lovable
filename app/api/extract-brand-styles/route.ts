@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { rejectUnauthenticatedPaidRequest } from '@/lib/auth/builder-session';
 
 export async function POST(request: NextRequest) {
+  const rejected = await rejectUnauthenticatedPaidRequest(request);
+  if (rejected) return rejected;
   try {
     const body = await request.json();
     const url = body.url;

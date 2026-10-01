@@ -1,7 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import FirecrawlApp from '@mendable/firecrawl-js';
+import { rejectUnauthenticatedPaidRequest } from '@/lib/auth/builder-session';
 
 export async function POST(request: NextRequest) {
+  const rejected = await rejectUnauthenticatedPaidRequest(request);
+  if (rejected) return rejected;
   try {
     const { url, formats = ['markdown', 'html'], options = {} } = await request.json();
     

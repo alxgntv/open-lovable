@@ -1,13 +1,13 @@
 import type { Metadata } from "next";
-import { Inter, Roboto_Mono } from "next/font/google";
 import localFont from "next/font/local";
 import "./globals.css";
 
-const inter = Inter({ 
-  subsets: ["latin"],
-  variable: "--font-inter"
-});
-
+// ─── Ariadne's Thread [AT-0061] ─────────────────────
+// What: Use only repository-bundled Geist fonts for the application shell
+// Why:  Google Fonts TLS failures were able to block an otherwise valid production container build
+// Date: 2026-09-30
+// Related: [AT-0028] infra→wrangler.jsonc:CodeMarketContainer, Dockerfile:builder
+// ─────────────────────────────────────────────────────
 const geistSans = localFont({
   src: "./fonts/GeistVF.woff",
   variable: "--font-geist-sans",
@@ -20,14 +20,13 @@ const geistMono = localFont({
   weight: "100 900",
 });
 
-const robotoMono = Roboto_Mono({
-  subsets: ["latin"],
-  variable: "--font-roboto-mono",
-});
-
 export const metadata: Metadata = {
   title: "Code Market",
   description: "Re-imagine any website in seconds with AI-powered website builder.",
+  icons: {
+    icon: "/codemarket-logo.png",
+    shortcut: "/codemarket-logo.png",
+  },
 };
 
 export default function RootLayout({
@@ -37,7 +36,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body className={`${inter.variable} ${geistSans.variable} ${geistMono.variable} ${robotoMono.variable} font-sans`}>
+      <body className={`${geistSans.variable} ${geistMono.variable} font-sans`}>
         {children}
       </body>
     </html>

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { parseMorphEdits, applyMorphEditToFile } from '@/lib/morph-fast-apply';
+import { rejectUnauthenticatedPaidRequest } from '@/lib/auth/builder-session';
 // Sandbox import not needed - using global sandbox from sandbox-manager
 import type { SandboxState } from '@/types/sandbox';
 import type { ConversationState } from '@/types/conversation';
@@ -262,6 +263,8 @@ function parseAIResponse(response: string): ParsedResponse {
 }
 
 export async function POST(request: NextRequest) {
+  const rejected = await rejectUnauthenticatedPaidRequest(request);
+  if (rejected) return rejected;
   try {
     const { response, isEdit = false, packages = [], sandboxId } = await request.json();
 
@@ -732,6 +735,24 @@ export async function POST(request: NextRequest) {
                 command: cmd,
                 error: (error as Error).message
               });
+            }
+          }
+        }
+
+        const wroteFiles = (results.filesCreated?.length ?? 0) + (results.filesUpdated?.length ?? 0) > 0;
+        if (wroteFiles && typeof providerInstance.restartViteServer === 'function') {
+          console.log('[apply-ai-code-stream] Starting Vite preview after applying files');
+          await sendProgress({
+            type: 'status',
+            message: 'Starting preview...'
+          });
+          try {
+            await providerInstance.restartViteServer();
+            console.log('[apply-ai-code-stream] Vite preview is running');
+          } catch (error) {
+            console.error('[apply-ai-code-stream] Vite preview failed to start:', error);
+            if (results.errors) {
+              results.errors.push(`Preview failed to start: ${(error as Error).message}`);
             }
           }
         }

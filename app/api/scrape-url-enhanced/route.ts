@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { rejectUnauthenticatedPaidRequest } from '@/lib/auth/builder-session';
 
 // Function to sanitize smart quotes and other problematic characters
 function sanitizeQuotes(text: string): string {
@@ -17,6 +18,8 @@ function sanitizeQuotes(text: string): string {
 }
 
 export async function POST(request: NextRequest) {
+  const rejected = await rejectUnauthenticatedPaidRequest(request);
+  if (rejected) return rejected;
   try {
     const { url } = await request.json();
     

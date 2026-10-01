@@ -7,11 +7,9 @@ declare global {
   var viteRestartInProgress: boolean;
 }
 
-const RESTART_COOLDOWN_MS = 5000; // 5 second cooldown between restarts
-
-export async function POST() {
+export async function POST(request: Request) {
   try {
-    // Check both v1 and v2 global references
+    const body = await request.json().catch(() => ({})) as { recover?: boolean };
     const provider = global.activeSandbox || global.activeSandboxProvider;
     
     if (!provider) {
@@ -21,33 +19,22 @@ export async function POST() {
       }, { status: 400 });
     }
     
-    // Check if restart is already in progress
     if (global.viteRestartInProgress) {
-      console.log('[restart-vite] Vite restart already in progress, skipping...');
+      console.log('[restart-vite] Vite start already in progress, waiting...');
       return NextResponse.json({
         success: true,
-        message: 'Vite restart already in progress'
+        message: 'Vite start already in progress'
       });
     }
-    
-    // Check cooldown
-    const now = Date.now();
-    if (global.lastViteRestartTime && (now - global.lastViteRestartTime) < RESTART_COOLDOWN_MS) {
-      const remainingTime = Math.ceil((RESTART_COOLDOWN_MS - (now - global.lastViteRestartTime)) / 1000);
-      console.log(`[restart-vite] Cooldown active, ${remainingTime}s remaining`);
-      return NextResponse.json({
-        success: true,
-        message: `Vite was recently restarted, cooldown active (${remainingTime}s remaining)`
-      });
-    }
-    
-    // Set the restart flag
+
     global.viteRestartInProgress = true;
     
-    console.log('[restart-vite] Using provider method to restart Vite...');
-    
-    // Use the provider's restartViteServer method if available
-    if (typeof provider.restartViteServer === 'function') {
+    console.log('[restart-vite] Using provider method to restart Vite', { recover: body.recover === true });
+
+    if (body.recover === true && typeof provider.recoverDeadVite === 'function') {
+      await provider.recoverDeadVite();
+      console.log('[restart-vite] Dead Vite process replaced');
+    } else if (typeof provider.restartViteServer === 'function') {
       await provider.restartViteServer();
       console.log('[restart-vite] Vite restarted via provider method');
     } else {

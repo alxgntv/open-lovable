@@ -1,8 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createGroq } from '@ai-sdk/groq';
-import { createAnthropic } from '@ai-sdk/anthropic';
-import { createOpenAI } from '@ai-sdk/openai';
-import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { streamText } from 'ai';
 import type { SandboxState } from '@/types/sandbox';
 import { selectFilesForEdit, getFileContents, formatFilesForAI } from '@/lib/context-selector';
@@ -10,38 +6,16 @@ import { executeSearchPlan, formatSearchResultsForAI, selectTargetFile } from '@
 import { FileManifest } from '@/types/file-manifest';
 import type { ConversationState, ConversationMessage, ConversationEdit } from '@/types/conversation';
 import { appConfig } from '@/config/app.config';
+import { getGetBlockDefaultModel, getGetBlockLanguageModel, getGetBlockMaxCompletionTokens, listGetBlockModels } from '@/lib/ai/getblock';
+import { createLaunchGenerationStream } from '@/lib/ai/launch-generation-service';
+import type { LaunchFidelity } from '@/lib/launch/types';
+import { rejectUnauthenticatedPaidRequest } from '@/lib/auth/builder-session';
 
-// Force dynamic route to enable streaming
 export const dynamic = 'force-dynamic';
 
-// Check if we're using Vercel AI Gateway
-const isUsingAIGateway = !!process.env.AI_GATEWAY_API_KEY;
-const aiGatewayBaseURL = 'https://ai-gateway.vercel.sh/v1';
-
-console.log('[generate-ai-code-stream] AI Gateway config:', {
-  isUsingAIGateway,
-  hasGroqKey: !!process.env.GROQ_API_KEY,
-  hasAIGatewayKey: !!process.env.AI_GATEWAY_API_KEY
-});
-
-const groq = createGroq({
-  apiKey: process.env.AI_GATEWAY_API_KEY ?? process.env.GROQ_API_KEY,
-  baseURL: isUsingAIGateway ? aiGatewayBaseURL : undefined,
-});
-
-const anthropic = createAnthropic({
-  apiKey: process.env.AI_GATEWAY_API_KEY ?? process.env.ANTHROPIC_API_KEY,
-  baseURL: isUsingAIGateway ? aiGatewayBaseURL : (process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com/v1'),
-});
-
-const googleGenerativeAI = createGoogleGenerativeAI({
-  apiKey: process.env.AI_GATEWAY_API_KEY ?? process.env.GEMINI_API_KEY,
-  baseURL: isUsingAIGateway ? aiGatewayBaseURL : undefined,
-});
-
-const openai = createOpenAI({
-  apiKey: process.env.AI_GATEWAY_API_KEY ?? process.env.OPENAI_API_KEY,
-  baseURL: isUsingAIGateway ? aiGatewayBaseURL : process.env.OPENAI_BASE_URL,
+console.log('[generate-ai-code-stream] GetBlock inference config:', {
+  hasGetBlockKey: !!process.env.GETBLOCK_API_KEY,
+  baseUrl: process.env.GETBLOCK_INFERENCE_BASE_URL || 'https://inference.eu-central-1.getblock.io',
 });
 
 // Helper function to analyze user preferences from conversation history
@@ -89,8 +63,64 @@ declare global {
 }
 
 export async function POST(request: NextRequest) {
+  const rejected = await rejectUnauthenticatedPaidRequest(request);
+  if (rejected) return rejected;
   try {
-    const { prompt, model = 'openai/gpt-oss-20b', context, isEdit = false } = await request.json();
+    const body = await request.json();
+    const {
+      prompt,
+      model: requestedModel = '',
+      context,
+      isEdit = false,
+      launchMode = false,
+      launchFidelity = 'exact',
+      sourceContext,
+      diagnostics,
+      currentArtifact,
+    } = body;
+    let model = typeof requestedModel === 'string' ? requestedModel.trim() : '';
+    if (!model) {
+      const catalog = await listGetBlockModels();
+      model = getGetBlockDefaultModel(catalog);
+      console.log('[generate-ai-code-stream] Request had no model id, using catalog default', model);
+    }
+
+    // ─── Ariadne's Thread [AT-0037] ─────────────────────
+    // What: Route durable launch generation through the stateless artifact service
+    // Why:  Launch retries must not mutate global conversation or depend on an active sandbox singleton
+    // Date: 2026-09-30
+    // Related: [AT-0036] lib/ai/launch-generation-service.ts:generateLaunchArtifactText, [AT-0025] infra→cloudflare/launch-run.ts:LaunchRun
+    // ─────────────────────────────────────────────────────
+    if (launchMode === true) {
+      if (typeof prompt !== 'string' || !prompt.trim()) {
+        return NextResponse.json({ success: false, error: 'Prompt is required' }, { status: 400 });
+      }
+      const supportedFidelity = new Set<LaunchFidelity>(['baseline', 'exact', 'mocked', 'dependency-free']);
+      const fidelity: LaunchFidelity = supportedFidelity.has(launchFidelity)
+        ? launchFidelity
+        : 'exact';
+      console.log('[generate-ai-code-stream] Starting durable launch generation', {
+        model,
+        fidelity,
+        promptChars: prompt.length,
+        sourceContextChars: typeof sourceContext === 'string' ? sourceContext.length : 0,
+        diagnosticsChars: typeof diagnostics === 'string' ? diagnostics.length : 0,
+      });
+      return new NextResponse(createLaunchGenerationStream({
+        prompt,
+        model,
+        fidelity,
+        sourceContext: typeof sourceContext === 'string' ? sourceContext : undefined,
+        diagnostics: typeof diagnostics === 'string' ? diagnostics : undefined,
+        currentArtifact: typeof currentArtifact === 'string' ? currentArtifact : undefined,
+      }), {
+        headers: {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache, no-transform',
+          Connection: 'keep-alive',
+        },
+      });
+    }
     
     console.log('[generate-ai-code-stream] Received request:');
     console.log('[generate-ai-code-stream] - prompt:', prompt);
@@ -1212,39 +1242,20 @@ MORPH FAST APPLY MODE (EDIT-ONLY):
         // Track packages that need to be installed
         const packagesToInstall: string[] = [];
         
-        // Determine which provider to use based on model
-        const isAnthropic = model.startsWith('anthropic/');
-        const isGoogle = model.startsWith('google/');
-        const isOpenAI = model.startsWith('openai/');
-        const isKimiGroq = model === 'moonshotai/kimi-k2-instruct-0905';
-        const modelProvider = isAnthropic ? anthropic : 
-                              (isOpenAI ? openai : 
-                              (isGoogle ? googleGenerativeAI : 
-                              (isKimiGroq ? groq : groq)));
-        
-        // Fix model name transformation for different providers
-        let actualModel: string;
-        if (isAnthropic) {
-          actualModel = model.replace('anthropic/', '');
-        } else if (isOpenAI) {
-          actualModel = model.replace('openai/', '');
-        } else if (isKimiGroq) {
-          // Kimi on Groq - use full model string
-          actualModel = 'moonshotai/kimi-k2-instruct-0905';
-        } else if (isGoogle) {
-          // Google uses specific model names - convert our naming to theirs  
-          actualModel = model.replace('google/', '');
-        } else {
-          actualModel = model;
-        }
+        const actualModel = model;
+        console.log('[generate-ai-code-stream] Using GetBlock inference', {
+          model: actualModel,
+          hasGetBlockKey: !!process.env.GETBLOCK_API_KEY,
+        });
 
-        console.log(`[generate-ai-code-stream] Using provider: ${isAnthropic ? 'Anthropic' : isGoogle ? 'Google' : isOpenAI ? 'OpenAI' : 'Groq'}, model: ${actualModel}`);
-        console.log(`[generate-ai-code-stream] AI Gateway enabled: ${isUsingAIGateway}`);
-        console.log(`[generate-ai-code-stream] Model string: ${model}`);
+        const maxOutputTokens = await getGetBlockMaxCompletionTokens(actualModel);
+        console.log('[generate-ai-code-stream] Using model max completion tokens', {
+          model: actualModel,
+          maxOutputTokens,
+        });
 
-        // Make streaming API call with appropriate provider
         const streamOptions: any = {
-          model: modelProvider(actualModel),
+          model: await getGetBlockLanguageModel(actualModel),
           messages: [
             { 
               role: 'system', 
@@ -1305,7 +1316,7 @@ If you're running out of space, generate FEWER files but make them COMPLETE.
 It's better to have 3 complete files than 10 incomplete files.`
             }
           ],
-          maxTokens: 8192, // Reduce to ensure completion
+          ...(maxOutputTokens ? { maxOutputTokens } : {}),
           stopSequences: [] // Don't stop early
           // Note: Neither Groq nor Anthropic models support tool/function calling in this context
           // We use XML tags for package detection instead
@@ -1316,8 +1327,7 @@ It's better to have 3 complete files than 10 incomplete files.`
           streamOptions.temperature = 0.7;
         }
         
-        // Add reasoning effort for GPT-5 models
-        if (isOpenAI) {
+        if (model.startsWith('openai/')) {
           streamOptions.experimental_providerMetadata = {
             openai: {
               reasoningEffort: 'high'
@@ -1336,45 +1346,29 @@ It's better to have 3 complete files than 10 incomplete files.`
           } catch (streamError: any) {
             console.error(`[generate-ai-code-stream] Error calling streamText (attempt ${retryCount + 1}/${maxRetries + 1}):`, streamError);
             
-            // Check if this is a Groq service unavailable error
-            const isGroqServiceError = isKimiGroq && streamError.message?.includes('Service unavailable');
             const isRetryableError = streamError.message?.includes('Service unavailable') || 
                                     streamError.message?.includes('rate limit') ||
                                     streamError.message?.includes('timeout');
             
             if (retryCount < maxRetries && isRetryableError) {
               retryCount++;
-              console.log(`[generate-ai-code-stream] Retrying in ${retryCount * 2} seconds...`);
+              console.log(`[generate-ai-code-stream] Retrying GetBlock in ${retryCount * 2} seconds...`);
               
-              // Send progress update about retry
               await sendProgress({ 
                 type: 'info', 
                 message: `Service temporarily unavailable, retrying (attempt ${retryCount + 1}/${maxRetries + 1})...` 
               });
               
-              // Wait before retry with exponential backoff
               await new Promise(resolve => setTimeout(resolve, retryCount * 2000));
-              
-              // If Groq fails, try switching to a fallback model
-              if (isGroqServiceError && retryCount === maxRetries) {
-                console.log('[generate-ai-code-stream] Groq service unavailable, falling back to GPT-4');
-                streamOptions.model = openai('gpt-4-turbo');
-                actualModel = 'gpt-4-turbo';
-              }
             } else {
-              // Final error, send to user
               await sendProgress({ 
                 type: 'error', 
-                message: `Failed to initialize ${isGoogle ? 'Gemini' : isAnthropic ? 'Claude' : isOpenAI ? 'GPT-5' : isKimiGroq ? 'Kimi (Groq)' : 'Groq'} streaming: ${streamError.message}` 
+                message: `Failed to initialize GetBlock streaming for ${actualModel}: ${streamError.message}`
               });
-              
-              // If this is a Google model error, provide helpful info
-              if (isGoogle) {
-                await sendProgress({ 
-                  type: 'info', 
-                  message: 'Tip: Make sure your GEMINI_API_KEY is set correctly and has proper permissions.' 
-                });
-              }
+              await sendProgress({
+                type: 'info',
+                message: 'Tip: Make sure GETBLOCK_API_KEY is set and the model exists in the GetBlock catalog.'
+              });
               
               throw streamError;
             }
@@ -1724,35 +1718,8 @@ Original request: ${prompt}
                 
 Provide the complete file content without any truncation. Include all necessary imports, complete all functions, and close all tags properly.`;
                 
-                // Make a focused API call to complete this specific file
-                // Create a new client for the completion based on the provider
-                let completionClient;
-                if (model.includes('gpt') || model.includes('openai')) {
-                  completionClient = openai;
-                } else if (model.includes('claude')) {
-                  completionClient = anthropic;
-                } else if (model === 'moonshotai/kimi-k2-instruct-0905') {
-                  completionClient = groq;
-                } else {
-                  completionClient = groq;
-                }
-                
-                // Determine the correct model name for the completion
-                let completionModelName: string;
-                if (model === 'moonshotai/kimi-k2-instruct-0905') {
-                  completionModelName = 'moonshotai/kimi-k2-instruct-0905';
-                } else if (model.includes('openai')) {
-                  completionModelName = model.replace('openai/', '');
-                } else if (model.includes('anthropic')) {
-                  completionModelName = model.replace('anthropic/', '');
-                } else if (model.includes('google')) {
-                  completionModelName = model.replace('google/', '');
-                } else {
-                  completionModelName = model;
-                }
-                
                 const completionResult = await streamText({
-                  model: completionClient(completionModelName),
+                  model: await getGetBlockLanguageModel(model),
                   messages: [
                     { 
                       role: 'system', 

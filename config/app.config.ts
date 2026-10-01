@@ -28,6 +28,18 @@ export const appConfig = {
     runtime: 'node22' // Available: node22, python3.13, v0-next-shadcn, cua-ubuntu-xfce
   },
 
+  // Cloudflare Sandboxes (Workers Paid, Durable Object per session)
+  cloudflareSandbox: {
+    timeoutMinutes: 60,
+    get timeoutMs() {
+      return this.timeoutMinutes * 60 * 1000;
+    },
+    vitePort: 5173,
+    viteStartupDelay: 10000,
+    workingDirectory: '/workspace/app',
+    requestTimeoutMs: 600000,
+  },
+
   // E2B Sandbox Configuration
   e2b: {
     // Sandbox timeout in minutes
@@ -50,41 +62,13 @@ export const appConfig = {
   
   // AI Model Configuration
   ai: {
-    // Default AI model
-    defaultModel: 'google/gemini-3-pro-preview',
-    
-    // Available models
-    availableModels: [
-      'openai/gpt-5',
-      'moonshotai/kimi-k2-instruct-0905',
-      'anthropic/claude-sonnet-4-20250514',
-      'google/gemini-3-pro-preview'
-    ],
-    
-    // Model display names
-    modelDisplayNames: {
-      'openai/gpt-5': 'GPT-5',
-      'moonshotai/kimi-k2-instruct-0905': 'Kimi K2 (Groq)',
-      'anthropic/claude-sonnet-4-20250514': 'Sonnet 4',
-      'google/gemini-3-pro-preview': 'Gemini 3 Pro (Preview)'
-    } as Record<string, string>,
-    
-    // Model API configuration
-    modelApiConfig: {
-      'moonshotai/kimi-k2-instruct-0905': {
-        provider: 'groq',
-        model: 'moonshotai/kimi-k2-instruct-0905'
-      }
-    },
+    defaultModel: '',
+    availableModels: [] as string[],
+    modelDisplayNames: {} as Record<string, string>,
+    modelApiConfig: {},
     
     // Temperature settings for non-reasoning models
     defaultTemperature: 0.7,
-    
-    // Max tokens for code generation
-    maxTokens: 8000,
-    
-    // Max tokens for truncation recovery
-    truncationRecoveryMaxTokens: 4000,
   },
   
   // Code Application Configuration
@@ -139,7 +123,7 @@ export const appConfig = {
     useLegacyPeerDeps: true,
     
     // Package installation timeout (milliseconds)
-    installTimeout: 60000,
+    installTimeout: 600000,
     
     // Auto-restart Vite after package installation
     autoRestartVite: true,

@@ -1,11 +1,10 @@
 'use client';
 
 import { useState, useEffect, useRef, Suspense } from 'react';
-import { useSearchParams, useRouter } from 'next/navigation';
+import { useSearchParams, useRouter, usePathname } from 'next/navigation';
 import Image from 'next/image';
 import { appConfig } from '@/config/app.config';
 import HeroInput from '@/components/HeroInput';
-import SidebarInput from '@/components/app/generation/SidebarInput';
 import HeaderBrandKit from '@/components/shared/header/BrandKit/BrandKit';
 import { HeaderProvider } from '@/components/shared/header/HeaderContext';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -25,6 +24,16 @@ import {
 } from '@/lib/icons';
 import { motion } from 'framer-motion';
 import CodeApplicationProgress, { type CodeApplicationState } from '@/components/CodeApplicationProgress';
+import { useLaunchRun } from '@/components/app/generation/useLaunchRun';
+import { useBuilderSession } from '@/components/app/generation/useBuilderSession';
+import BuilderPaywall from '@/components/app/home/BuilderPaywall';
+import BuilderLoginModal from '@/components/app/generation/BuilderLoginModal';
+import {
+  PENDING_BUILDER_REQUEST_KEY,
+  parsePendingBuilderRequest,
+  serializePendingBuilderRequest,
+  type PendingBuilderRequest,
+} from '@/lib/auth/pending-request';
 
 interface SandboxData {
   sandboxId: string;
@@ -60,6 +69,51 @@ interface ScrapeData {
   error?: string;
 }
 
+interface CatalogModel {
+  id: string;
+  name: string;
+  supportedApis?: string[];
+}
+
+const PAGE_META_TITLE = 'Code Market';
+const PAGE_META_DESCRIPTION = 'Re-imagine any website in seconds with AI-powered website builder.';
+const BUILDER_INTRO_CONTENT = 'Hey, this is Alex, welcome to my code.market builder. It can help you turn your ideas into a finished project.';
+const BUILDER_INTRO_DISMISSED_KEY = 'builderIntroDismissed';
+const BUILDER_INTRO_DISMISSED_MAX_AGE_SECONDS = 315360000;
+
+function readBuilderIntroDismissed(): boolean {
+  if (typeof document === 'undefined') return false;
+  try {
+    const cookie = document.cookie
+      .split(';')
+      .map((entry) => entry.trim())
+      .find((entry) => entry.startsWith(`${BUILDER_INTRO_DISMISSED_KEY}=`));
+    const dismissed = cookie === `${BUILDER_INTRO_DISMISSED_KEY}=1`;
+    console.log('[generation] Read intro dismissal cookie', { dismissed });
+    return dismissed;
+  } catch (error) {
+    console.error('[generation] Could not read intro dismissal cookie', error);
+    return false;
+  }
+}
+
+function writeBuilderIntroDismissedCookie(): boolean {
+  if (typeof document === 'undefined' || typeof window === 'undefined') return false;
+  try {
+    const secure = window.location.protocol === 'https:' ? '; Secure' : '';
+    document.cookie = `${BUILDER_INTRO_DISMISSED_KEY}=1; Path=/; Max-Age=${BUILDER_INTRO_DISMISSED_MAX_AGE_SECONDS}; SameSite=Lax${secure}`;
+    console.log('[generation] Wrote intro dismissal cookie', {
+      name: BUILDER_INTRO_DISMISSED_KEY,
+      maxAgeSeconds: BUILDER_INTRO_DISMISSED_MAX_AGE_SECONDS,
+      secure: window.location.protocol === 'https:',
+    });
+    return true;
+  } catch (error) {
+    console.error('[generation] Could not write intro dismissal cookie', error);
+    return false;
+  }
+}
+
 function AISandboxPage() {
   const [sandboxData, setSandboxData] = useState<SandboxData | null>(null);
   const [loading, setLoading] = useState(false);
@@ -69,7 +123,7 @@ function AISandboxPage() {
   const [promptInput, setPromptInput] = useState('');
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
     {
-      content: 'Welcome! I can help you generate code with full context of your sandbox files and structure. Just start chatting - I\'ll automatically create a sandbox for you if needed!\n\nTip: If you see package errors like "react-router-dom not found", just type "npm install" or "check packages" to automatically install missing packages.',
+      content: BUILDER_INTRO_CONTENT,
       type: 'system',
       timestamp: new Date()
     }
@@ -78,10 +132,9 @@ function AISandboxPage() {
   const [aiEnabled] = useState(true);
   const searchParams = useSearchParams();
   const router = useRouter();
-  const [aiModel, setAiModel] = useState(() => {
-    const modelParam = searchParams.get('model');
-    return appConfig.ai.availableModels.includes(modelParam || '') ? modelParam! : appConfig.ai.defaultModel;
-  });
+  const pathname = usePathname();
+  const [aiModel, setAiModel] = useState(() => searchParams.get('model') || '');
+  const [catalogModels, setCatalogModels] = useState<CatalogModel[]>([]);
   const [urlOverlayVisible, setUrlOverlayVisible] = useState(false);
   const [urlInput, setUrlInput] = useState('');
   const [urlStatus, setUrlStatus] = useState<string[]>([]);
@@ -106,7 +159,6 @@ function AISandboxPage() {
   const [loadingStage, setLoadingStage] = useState<'gathering' | 'planning' | 'generating' | null>(null);
   const [isStartingNewGeneration, setIsStartingNewGeneration] = useState(false);
   const [sandboxFiles, setSandboxFiles] = useState<Record<string, string>>({});
-  const [hasInitialSubmission, setHasInitialSubmission] = useState<boolean>(false);
   const [fileStructure, setFileStructure] = useState<string>('');
   
   const [conversationContext, setConversationContext] = useState<{
@@ -160,8 +212,77 @@ function AISandboxPage() {
   // Store flag to trigger generation after component mounts
   const [shouldAutoGenerate, setShouldAutoGenerate] = useState(false);
 
+  // ─── Ariadne's Thread [AT-0049] ─────────────────────
+  // What: Attach the page to the server-owned launch run instead of treating React flags as orchestration state
+  // Why:  The right-hand preview must survive reloads and continue recovery after client stream disconnects
+  // Date: 2026-09-30
+  // Related: [AT-0048] frontend→components/app/generation/useLaunchRun.ts:useLaunchRun, [AT-0025] backend→cloudflare/launch-run.ts:LaunchRun
+  // ─────────────────────────────────────────────────────
+  const launchRun = useLaunchRun(searchParams.get('run'));
+  const builderSession = useBuilderSession();
+  const builderSessionRef = useRef(builderSession);
+  builderSessionRef.current = builderSession;
+  const generationRequestRef = useRef<Extract<PendingBuilderRequest, { kind: 'url' }> | null>(null);
+  const [loginOpen, setLoginOpen] = useState(false);
+
+  const ensureBuilderSignedIn = async (pending: PendingBuilderRequest): Promise<boolean> => {
+    const startedAt = Date.now();
+    while (builderSessionRef.current.loading && Date.now() - startedAt < 5_000) {
+      await new Promise((resolve) => window.setTimeout(resolve, 100));
+    }
+    if (builderSessionRef.current.user) return true;
+    sessionStorage.setItem(PENDING_BUILDER_REQUEST_KEY, serializePendingBuilderRequest(pending));
+    console.log('[generation] Saved Builder request until Code Market sign-in', {
+      kind: pending.kind,
+      promptChars: pending.kind === 'chat' ? pending.prompt.length : pending.url.length,
+    });
+    setLoginOpen(true);
+    return false;
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadGetBlockModels = async () => {
+      console.log('[generation] Loading GetBlock model catalog');
+      try {
+        const response = await fetch('/api/models');
+        const data = await response.json();
+        if (!response.ok || !data.success) {
+          console.error('[generation] Failed to load GetBlock models:', data.error);
+          return;
+        }
+        if (cancelled) return;
+        const models = Array.isArray(data.models) ? data.models : [];
+        setCatalogModels(models);
+        console.log('[generation] GetBlock models loaded:', models.length);
+        setAiModel((current) => {
+          if (current && models.some((model: CatalogModel) => model.id === current)) {
+            return current;
+          }
+          const storedModel = sessionStorage.getItem('selectedModel');
+          if (storedModel && models.some((model: CatalogModel) => model.id === storedModel)) {
+            return storedModel;
+          }
+          return data.defaultModel || models[0]?.id || '';
+        });
+      } catch (error) {
+        console.error('[generation] GetBlock catalog request failed:', error);
+      }
+    };
+
+    loadGetBlockModels();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // Clear old conversation data on component mount and create/restore sandbox
   useEffect(() => {
+    if (launchRun.enabled === null) {
+      console.log('[home] Waiting for durable launch capability before initializing a runtime');
+      return;
+    }
     let isMounted = true;
     let sandboxCreated = false; // Track if sandbox was created in this effect
 
@@ -181,9 +302,6 @@ function AISandboxPage() {
       const storedInstructions = sessionStorage.getItem('additionalInstructions');
       
       if (storedUrl) {
-        // Mark that we have an initial submission since we're loading with a URL
-        setHasInitialSubmission(true);
-        
         // Clear sessionStorage after reading  
         sessionStorage.removeItem('targetUrl');
         sessionStorage.removeItem('selectedStyle');
@@ -244,6 +362,12 @@ function AISandboxPage() {
         // Also set autoStart flag for the effect
         sessionStorage.setItem('autoStart', 'true');
       }
+
+      if (launchRun.enabled) {
+        console.log('[home] Durable launch orchestration is enabled; skipping legacy conversation and sandbox initialization');
+        setLoading(false);
+        return;
+      }
       
       // Clear old conversation
       try {
@@ -262,17 +386,27 @@ function AISandboxPage() {
       
       if (!isMounted) return;
 
-      // Check if sandbox ID is in URL
+      // ─── Ariadne's Thread [AT-0015] ─────────────────────
+      // What: Reuse the sandbox named in the URL instead of creating another
+      // Why:  A new mount was killing the sandbox before generated files were applied
+      // Date: 2026-09-30
+      // Related: app/generation/page.tsx:createSandbox
+      // ─────────────────────────────────────────────────────
       const sandboxIdParam = searchParams.get('sandbox');
       
       setLoading(true);
       try {
         if (sandboxIdParam) {
-          console.log('[home] Attempting to restore sandbox:', sandboxIdParam);
-          // For now, just create a new sandbox - you could enhance this to actually restore
-          // the specific sandbox if your backend supports it
-          sandboxCreated = true;
-          await createSandbox(true);
+          console.log('[home] Restoring sandbox from URL without creating a new one:', sandboxIdParam);
+          const statusResponse = await fetch('/api/sandbox-status');
+          const statusData = await statusResponse.json();
+          if (statusData.active && statusData.healthy && statusData.sandboxData) {
+            console.log('[home] Restored healthy sandbox', statusData.sandboxData);
+            setSandboxData(statusData.sandboxData);
+            updateStatus('Sandbox active', true);
+          } else {
+            console.log('[home] Sandbox in URL is not healthy yet, leaving the existing session alone');
+          }
         } else {
           console.log('[home] No sandbox in URL, creating new sandbox automatically...');
           sandboxCreated = true;
@@ -303,7 +437,7 @@ function AISandboxPage() {
       isMounted = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // Run only on mount
+  }, [launchRun.enabled]); // Initialize only after the server-side feature gate resolves
   
   useEffect(() => {
     // Handle Escape key for home screen
@@ -347,19 +481,82 @@ function AISandboxPage() {
 
 
   useEffect(() => {
+    if (launchRun.enabled !== false) return;
     // Only check sandbox status on mount if we don't already have sandboxData
     // AND we're not auto-starting a new generation (which would create a new sandbox)
     const autoStart = sessionStorage.getItem('autoStart');
     if (!sandboxData && autoStart !== 'true') {
       checkSandboxStatus();
     }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [launchRun.enabled]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (chatMessagesRef.current) {
       chatMessagesRef.current.scrollTop = chatMessagesRef.current.scrollHeight;
     }
   }, [chatMessages]);
+
+  useEffect(() => {
+    if (!readBuilderIntroDismissed()) return;
+    console.log('[generation] Skipping Builder intro because it was dismissed');
+    setChatMessages((previous) => previous.filter((message) => message.content !== BUILDER_INTRO_CONTENT));
+  }, []);
+
+  const dismissBuilderIntro = () => {
+    const persisted = writeBuilderIntroDismissedCookie();
+    console.log('[generation] Builder intro dismissed permanently', { persistedInCookie: persisted });
+    setChatMessages((previous) => previous.filter((message) => message.content !== BUILDER_INTRO_CONTENT));
+  };
+
+  // ─── Ariadne's Thread [AT-0050] ─────────────────────
+  // What: Project durable launch snapshots into the existing preview and progress UI
+  // Why:  The visible iframe must always use the stable last-known-good URL while server events drive status
+  // Date: 2026-09-30
+  // Related: [AT-0049] app/generation/page.tsx:useLaunchRun, [AT-0035] backend→cloudflare/launch-run.ts:reportRuntime
+  // ─────────────────────────────────────────────────────
+  useEffect(() => {
+    const snapshot = launchRun.snapshot;
+    if (!launchRun.enabled || !snapshot) return;
+    const previewVersion = snapshot.activeSandboxId
+      ? `revision=${snapshot.revision}&active=${encodeURIComponent(snapshot.activeSandboxId)}`
+      : 'baseline=1';
+    const previewUrl = `${snapshot.previewUrl}${snapshot.previewUrl.includes('?') ? '&' : '?'}${previewVersion}`;
+    setSandboxData((current) => (
+      current?.sandboxId === snapshot.runId && current.url === previewUrl
+        ? current
+        : {
+          sandboxId: snapshot.runId,
+          url: previewUrl,
+          provider: 'launch-run',
+        }
+    ));
+    setLoading(false);
+    setShowLoadingBackground(false);
+    setIsStartingNewGeneration(false);
+    setLoadingStage(null);
+    setActiveTab('preview');
+    updateStatus(snapshot.statusMessage, snapshot.availability === 'running');
+    setGenerationProgress((current) => ({
+      ...current,
+      isGenerating: !['RUNNING_EXACT', 'RUNNING_DEGRADED', 'CANCELLED'].includes(snapshot.state),
+      isStreaming: snapshot.state === 'GENERATING',
+      isThinking: snapshot.state === 'GENERATING',
+      thinkingText: snapshot.state === 'GENERATING' ? snapshot.statusMessage : undefined,
+      status: snapshot.statusMessage,
+    }));
+
+    if (searchParams.get('run') !== snapshot.runId) {
+      const params = new URLSearchParams(searchParams.toString());
+      params.set('run', snapshot.runId);
+      params.delete('sandbox');
+      router.replace(`${pathname}?${params.toString()}`);
+    }
+  }, [launchRun.enabled, launchRun.snapshot, pathname, router, searchParams]);
+
+  useEffect(() => {
+    if (!launchRun.error) return;
+    addChatMessage(`Launch recovery notice: ${launchRun.error}`, 'error');
+  }, [launchRun.error]);
 
   // Auto-trigger generation when flag is set (from home page navigation)
   useEffect(() => {
@@ -527,16 +724,15 @@ function AISandboxPage() {
     }
   };
 
-  const sandboxCreationRef = useRef<boolean>(false);
+  const sandboxCreationRef = useRef<Promise<any> | null>(null);
   
   const createSandbox = async (fromHomeScreen = false) => {
-    // Prevent duplicate sandbox creation
     if (sandboxCreationRef.current) {
-      console.log('[createSandbox] Sandbox creation already in progress, skipping...');
-      return null;
+      console.log('[createSandbox] Sandbox creation already in progress, waiting for it...');
+      return sandboxCreationRef.current;
     }
-    
-    sandboxCreationRef.current = true;
+
+    const creation = (async () => {
     console.log('[createSandbox] Starting sandbox creation...');
     setLoading(true);
     setShowLoadingBackground(true);
@@ -555,7 +751,6 @@ function AISandboxPage() {
       console.log('[createSandbox] Response data:', data);
       
       if (data.success) {
-        sandboxCreationRef.current = false; // Reset the ref on success
         console.log('[createSandbox] Setting sandboxData from creation:', data);
         setSandboxData(data);
         updateStatus('Sandbox active', true);
@@ -563,13 +758,11 @@ function AISandboxPage() {
         log(`Sandbox ID: ${data.sandboxId}`);
         log(`URL: ${data.url}`);
         
-        // Update URL with sandbox ID
         const newParams = new URLSearchParams(searchParams.toString());
         newParams.set('sandbox', data.sandboxId);
         newParams.set('model', aiModel);
-        router.push(`/generation?${newParams.toString()}`, { scroll: false });
+        router.replace(`${pathname}?${newParams.toString()}`, { scroll: false });
         
-        // Fade out loading background after sandbox loads
         setTimeout(() => {
           setShowLoadingBackground(false);
         }, 3000);
@@ -578,28 +771,16 @@ function AISandboxPage() {
           displayStructure(data.structure);
         }
         
-        // Fetch sandbox files after creation
         setTimeout(fetchSandboxFiles, 1000);
         
-        // For Vercel sandboxes, Vite is already started during setupViteApp
-        // No need to restart it immediately after creation
-        // Only restart if there's an actual issue later
         console.log('[createSandbox] Sandbox ready with Vite server running');
         
-        // Only add welcome message if not coming from home screen
         if (!fromHomeScreen) {
           addChatMessage(`Sandbox created! ID: ${data.sandboxId}. I now have context of your sandbox and can help you build your app. Just ask me to create components and I'll automatically apply them!
 
 Tip: I automatically detect and install npm packages from your code imports (like react-router-dom, axios, etc.)`, 'system');
         }
         
-        setTimeout(() => {
-          if (iframeRef.current) {
-            iframeRef.current.src = data.url;
-          }
-        }, 100);
-        
-        // Return the sandbox data so it can be used immediately
         return data;
       } else {
         throw new Error(data.error || 'Unknown error');
@@ -612,7 +793,14 @@ Tip: I automatically detect and install npm packages from your code imports (lik
       throw error;
     } finally {
       setLoading(false);
-      sandboxCreationRef.current = false; // Reset the ref
+    }
+    })();
+
+    sandboxCreationRef.current = creation;
+    try {
+      return await creation;
+    } finally {
+      sandboxCreationRef.current = null;
     }
   };
 
@@ -624,7 +812,112 @@ Tip: I automatically detect and install npm packages from your code imports (lik
     }
   };
 
-  const applyGeneratedCode = async (code: string, isEdit: boolean = false, overrideSandboxData?: SandboxData) => {
+  const collectGeneratedFix = async (prompt: string, sandboxId?: string) => {
+    console.log('[drive-preview] Asking the model to fix the preview');
+    const response = await fetch('/api/generate-ai-code-stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        prompt,
+        model: aiModel,
+        isEdit: true,
+        context: {
+          sandboxId,
+          currentFiles: [],
+        },
+      }),
+    });
+    if (!response.ok || !response.body) {
+      throw new Error(`Fix generation failed: ${response.status}`);
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let generatedCode = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        try {
+          const data = JSON.parse(line.slice(6));
+          if (data.type === 'complete' && data.generatedCode) {
+            generatedCode = data.generatedCode;
+          }
+          if (data.type === 'error') {
+            throw new Error(data.error || 'Fix generation failed');
+          }
+        } catch (error) {
+          if (error instanceof SyntaxError) continue;
+          throw error;
+        }
+      }
+    }
+    console.log('[drive-preview] Fix generation finished', { chars: generatedCode.length });
+    return generatedCode;
+  };
+
+  const readPreviewStatus = async () => {
+    const statusResponse = await fetch('/api/preview-status');
+    const status = await statusResponse.json();
+    console.log('[drive-preview] Preview status', {
+      ok: status.ok,
+      status: status.status,
+      modules: status.modules,
+    });
+    return status;
+  };
+
+  const drivePreviewUntilRunning = async (sandbox?: SandboxData | null) => {
+    const maxFixes = 8;
+    let current = sandbox;
+    console.log('[drive-preview] Agent is driving the preview until the module graph and Vite log are clean', { sandboxId: current?.sandboxId });
+    for (let attempt = 1; attempt <= maxFixes; attempt++) {
+      addChatMessage(`Checking preview modules and Vite log (${attempt}/${maxFixes})...`, 'system');
+      const status = await readPreviewStatus();
+      if (status.ok) {
+        addChatMessage('Preview is running. The app modules compiled and the Vite log is clean.', 'system');
+        if (iframeRef.current && current?.url) {
+          iframeRef.current.src = `${current.url}?t=${Date.now()}&ready=1`;
+        }
+        return true;
+      }
+      const errorText = String(status.error || 'Preview did not start');
+      console.log('[drive-preview] Preview is not ready', attempt, status.failureKind || 'unknown', errorText);
+      if (status.failureKind === 'missing' || errorText === 'No active sandbox') {
+        addChatMessage(`Sandbox is not running. Creating a new one (${attempt}/${maxFixes}).`, 'system');
+        current = await createSandbox(true);
+        continue;
+      }
+      if (status.failureKind !== 'code') {
+        addChatMessage(`Dev server stopped. Restarting the process (${attempt}/${maxFixes}).`, 'system');
+        await fetch('/api/restart-vite', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ recover: true }),
+        });
+        continue;
+      }
+      addChatMessage(`Compile error. Fixing the file (${attempt}/${maxFixes}).\n${errorText}`, 'system');
+      const fixCode = await collectGeneratedFix(
+        `Vite failed to compile the app. Fix only the file named in the error. Return one complete <file path="..."> block and nothing else.\n\n${errorText}`,
+        current?.sandboxId
+      );
+      if (!fixCode.includes('<file')) {
+        console.log('[drive-preview] Model returned no file fix, checking the preview again');
+        addChatMessage('No file change came back. Checking the preview again.', 'system');
+        continue;
+      }
+      await applyGeneratedCode(fixCode, true, current || undefined, false);
+    }
+    addChatMessage('Preview is still not running. The last Vite log is in the messages above.', 'system');
+    return false;
+  };
+
+  const applyGeneratedCode = async (code: string, isEdit: boolean = false, overrideSandboxData?: SandboxData, drivePreview: boolean = true) => {
     setLoading(true);
     log('Applying AI-generated code...');
     
@@ -884,6 +1177,9 @@ Tip: I automatically detect and install npm packages from your code imports (lik
         }
         
         log('Code applied successfully!');
+        if (drivePreview) {
+          await drivePreviewUntilRunning(effectiveSandboxData);
+        }
         console.log('[applyGeneratedCode] Response data:', data);
         console.log('[applyGeneratedCode] Debug info:', data.debug);
         console.log('[applyGeneratedCode] Current sandboxData:', sandboxData);
@@ -1542,7 +1838,9 @@ Tip: I automatically detect and install npm packages from your code imports (lik
               /* eslint-disable-next-line @next/next/no-img-element */
               <img 
                 src={urlScreenshot} 
-                alt="Website preview" 
+                alt={PAGE_META_TITLE}
+                title={PAGE_META_TITLE}
+                description={PAGE_META_DESCRIPTION}
                 className="absolute inset-0 w-full h-full object-cover transition-opacity duration-700"
                 style={{ 
                   opacity: isScreenshotLoaded ? 1 : 0,
@@ -1672,7 +1970,7 @@ Tip: I automatically detect and install npm packages from your code imports (lik
               </div>
             )}
             
-            {/* Refresh button */}
+            {builderSession.user && (
             <button
               onClick={() => {
                 if (iframeRef.current && sandboxData?.url) {
@@ -1688,6 +1986,7 @@ Tip: I automatically detect and install npm packages from your code imports (lik
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
               </svg>
             </button>
+            )}
           </div>
         );
       }
@@ -1716,17 +2015,85 @@ Tip: I automatically detect and install npm packages from your code imports (lik
     return null;
   };
 
-  const sendChatMessage = async () => {
-    const message = aiChatInput.trim();
+  const sendChatMessage = async (override?: string) => {
+    const message = (typeof override === 'string' ? override : aiChatInput).trim();
     if (!message) return;
     
     if (!aiEnabled) {
       addChatMessage('AI is disabled. Please enable it first.', 'system');
       return;
     }
+
+    // ─── Ariadne's Thread [AT-0074] ─────────────────────
+    // What: Hold the first chat request until a verified Code Market session exists
+    // Why:  Generation tokens must not be spent before the user signs in, including after a reload
+    // Date: 2026-09-30
+    // Related: [AT-0073] frontend→components/app/generation/BuilderLoginModal.tsx:BuilderLoginModal, [AT-0072] backend→app/api/launch-runs/route.ts:POST
+    // ─────────────────────────────────────────────────────
+    const signedIn = await ensureBuilderSignedIn({
+      kind: 'chat',
+      prompt: message,
+      model: aiModel || undefined,
+      savedAt: new Date().toISOString(),
+    });
+    if (!signedIn) return;
     
     addChatMessage(message, 'user');
     setAiChatInput('');
+
+    // ─── Ariadne's Thread [AT-0051] ─────────────────────
+    // What: Submit chat builds and edits as durable launch revisions
+    // Why:  Generation must continue server-side and keep the previous preview alive through every repair
+    // Date: 2026-09-30
+    // Related: [AT-0048] frontend→components/app/generation/useLaunchRun.ts:submit, [AT-0050] app/generation/page.tsx:launch snapshot effect
+    // ─────────────────────────────────────────────────────
+    if (launchRun.enabled !== false) {
+      setGenerationProgress((current) => ({
+        ...current,
+        isGenerating: true,
+        isStreaming: false,
+        isThinking: true,
+        thinkingText: 'Starting durable launch orchestration...',
+        status: 'Publishing a safe preview...',
+        isEdit: Boolean(launchRun.snapshot),
+      }));
+      addChatMessage(
+        launchRun.snapshot
+          ? 'Building this change as an isolated revision. The current preview will stay online until the change passes every check.'
+          : 'Publishing a safe interactive preview first, then building the full product in isolation.',
+        'system',
+      );
+      try {
+        const snapshot = await launchRun.submit({
+          prompt: message,
+          model: aiModel || undefined,
+          context: {
+            structure: structureContent,
+            recentMessages: chatMessages.slice(-10).map((entry) => ({
+              type: entry.type,
+              content: entry.content,
+            })),
+            currentProject: conversationContext.currentProject,
+            appliedRevisionCount: conversationContext.appliedCode.length,
+          },
+        });
+        addChatMessage(snapshot.statusMessage, 'system');
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Durable launch submission failed';
+        console.error('[chat] Durable launch submission failed', error);
+        if (errorMessage.includes('Sign in')) {
+          sessionStorage.setItem(PENDING_BUILDER_REQUEST_KEY, serializePendingBuilderRequest({
+            kind: 'chat',
+            prompt: message,
+            model: aiModel || undefined,
+            savedAt: new Date().toISOString(),
+          }));
+          setLoginOpen(true);
+        }
+        addChatMessage(`Launch submission failed: ${errorMessage}`, 'error');
+      }
+      return;
+    }
     
     // Check for special commands
     const lowerMessage = message.toLowerCase().trim();
@@ -1740,18 +2107,24 @@ Tip: I automatically detect and install npm packages from your code imports (lik
       return;
     }
     
-    // Start sandbox creation in parallel if needed
-    let sandboxPromise: Promise<void> | null = null;
     let sandboxCreating = false;
-    
-    if (!sandboxData) {
+    let activeSandboxData = sandboxData;
+    if (!activeSandboxData) {
       sandboxCreating = true;
-      addChatMessage('Creating sandbox while I plan your app...', 'system');
-      sandboxPromise = createSandbox(true).catch((error: any) => {
+      addChatMessage('Starting sandbox...', 'system');
+      try {
+        activeSandboxData = await createSandbox(true);
+      } catch (error: any) {
         addChatMessage(`Failed to create sandbox: ${error.message}`, 'system');
-        throw error;
-      });
+        return;
+      }
     }
+    const baseReady = await drivePreviewUntilRunning(activeSandboxData);
+    if (!baseReady) {
+      addChatMessage('Base preview did not start. Generation stopped.', 'system');
+      return;
+    }
+    const sandboxPromise = Promise.resolve(activeSandboxData);
     
     // Determine if this is an edit
     const isEdit = conversationContext.appliedCode.length > 0;
@@ -1795,12 +2168,29 @@ Tip: I automatically detect and install npm packages from your code imports (lik
       console.log('[chat] - sandboxId:', fullContext.sandboxId);
       console.log('[chat] - isEdit:', conversationContext.appliedCode.length > 0);
       
+      let modelForRequest = aiModel;
+      if (!modelForRequest) {
+        console.log('[chat] Selected model is empty, loading GetBlock catalog default');
+        const modelsResponse = await fetch('/api/models');
+        const modelsData = await modelsResponse.json();
+        const models = Array.isArray(modelsData.models) ? modelsData.models : [];
+        modelForRequest = modelsData.defaultModel || models[0]?.id || '';
+        if (modelForRequest) {
+          console.log('[chat] Using catalog default model', modelForRequest);
+          setAiModel(modelForRequest);
+          setCatalogModels(models);
+        }
+      }
+      if (!modelForRequest) {
+        throw new Error('GetBlock model id is required');
+      }
+
       const response = await fetch('/api/generate-ai-code-stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           prompt: message,
-          model: aiModel,
+          model: modelForRequest,
           context: fullContext,
           isEdit: conversationContext.appliedCode.length > 0
         })
@@ -2632,7 +3022,76 @@ Tip: I automatically detect and install npm packages from your code imports (lik
   };
 
   const startGeneration = async () => {
-    if (!homeUrlInput.trim()) return;
+    const requestedUrl = (generationRequestRef.current?.url ?? homeUrlInput).trim();
+    const requestedContext = generationRequestRef.current?.context ?? homeContextInput;
+    const requestedStyle = generationRequestRef.current?.style ?? selectedStyle;
+    generationRequestRef.current = null;
+    if (!requestedUrl) return;
+    const signedIn = await ensureBuilderSignedIn({
+      kind: 'url',
+      url: requestedUrl,
+      context: requestedContext || undefined,
+      style: requestedStyle || undefined,
+      model: aiModel || undefined,
+      savedAt: new Date().toISOString(),
+    });
+    if (!signedIn) return;
+
+    // ─── Ariadne's Thread [AT-0052] ─────────────────────
+    // What: Launch URL recreation through the durable server workflow before any scrape can block the UI
+    // Why:  Scraping is optional source context; failure must degrade gracefully while a safe product already runs
+    // Date: 2026-09-30
+    // Related: [AT-0051] app/generation/page.tsx:sendChatMessage, [AT-0038] backend→cloudflare/launch-run.ts:generateArtifact
+    // ─────────────────────────────────────────────────────
+    if (launchRun.enabled !== false) {
+      let sourceUrl = requestedUrl;
+      if (!/^https?:\/\//i.test(sourceUrl)) sourceUrl = `https://${sourceUrl}`;
+      const prompt = [
+        `Recreate ${sourceUrl} as a complete, responsive React product.`,
+        requestedContext ? `Additional requirements: ${requestedContext}` : '',
+        'Keep unavailable external integrations functional through local mock data.',
+      ].filter(Boolean).join('\n');
+      setShowHomeScreen(false);
+      setActiveTab('preview');
+      setLoading(true);
+      setLoadingStage('gathering');
+      setShowLoadingBackground(true);
+      setChatMessages([]);
+      addChatMessage(`Starting durable recreation of ${sourceUrl}...`, 'system');
+      try {
+        const snapshot = await launchRun.submit({
+          prompt,
+          model: aiModel || undefined,
+          sourceUrl,
+          context: {
+            additionalRequirements: requestedContext || undefined,
+            selectedStyle: requestedStyle || undefined,
+          },
+        });
+        addChatMessage(snapshot.statusMessage, 'system');
+        sessionStorage.removeItem('autoStart');
+        setShouldAutoGenerate(false);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Durable launch submission failed';
+        console.error('[generation] Durable URL launch failed', error);
+        if (message.includes('Sign in')) {
+          sessionStorage.setItem(PENDING_BUILDER_REQUEST_KEY, serializePendingBuilderRequest({
+            kind: 'url',
+            url: requestedUrl,
+            context: requestedContext || undefined,
+            style: requestedStyle || undefined,
+            model: aiModel || undefined,
+            savedAt: new Date().toISOString(),
+          }));
+          setLoginOpen(true);
+        }
+        addChatMessage(`Launch submission failed: ${message}`, 'error');
+        setLoading(false);
+        setLoadingStage(null);
+        setShowLoadingBackground(false);
+      }
+      return;
+    }
     
     setHomeScreenFading(true);
     
@@ -2793,7 +3252,6 @@ Tip: I automatically detect and install npm packages from your code imports (lik
         // Brief pause before switching to generation tab
         setTimeout(() => {
           setLoadingStage('generating');
-          setActiveTab('generation');
         }, 1500);
 
         // Build the appropriate prompt based on mode
@@ -3278,12 +3736,124 @@ Focus on the key sections and content, making it clean and modern.`;
     }, 500);
   };
 
+  const sendChatMessageRef = useRef(sendChatMessage);
+  const startGenerationRef = useRef(startGeneration);
+  sendChatMessageRef.current = sendChatMessage;
+  startGenerationRef.current = startGeneration;
+  const pendingClaimedRef = useRef(false);
+
+  const resumeSavedBuilderRequest = async () => {
+    if (pendingClaimedRef.current) return;
+    const pending = parsePendingBuilderRequest(sessionStorage.getItem(PENDING_BUILDER_REQUEST_KEY));
+    if (!pending) return;
+    pendingClaimedRef.current = true;
+    sessionStorage.removeItem(PENDING_BUILDER_REQUEST_KEY);
+    console.log('[generation] Resuming saved Builder request after sign-in', { kind: pending.kind });
+    try {
+      if (pending.kind === 'chat') {
+        if (pending.model) setAiModel(pending.model);
+        await sendChatMessageRef.current(pending.prompt);
+        return;
+      }
+      if (pending.model) setAiModel(pending.model);
+      generationRequestRef.current = pending;
+      setHomeUrlInput(pending.url);
+      setHomeContextInput(pending.context || '');
+      if (pending.style) setSelectedStyle(pending.style);
+      await startGenerationRef.current();
+    } finally {
+      pendingClaimedRef.current = false;
+    }
+  };
+  const resumeSavedBuilderRequestRef = useRef(resumeSavedBuilderRequest);
+  resumeSavedBuilderRequestRef.current = resumeSavedBuilderRequest;
+
+  useEffect(() => {
+    if (builderSession.loading || !builderSession.user) return;
+    if (builderSession.user.paidPlan !== true) {
+      console.log('[generation] Skipping saved request until a paid plan exists', { userId: builderSession.user.id });
+      return;
+    }
+    void resumeSavedBuilderRequestRef.current();
+  }, [builderSession.loading, builderSession.user]);
+
+  useEffect(() => {
+    console.log('[generation-header] Model and sandbox controls', {
+      visible: Boolean(builderSession.user),
+      loading: builderSession.loading,
+      hiddenUntilSignIn: ['model-select', 'new-sandbox', 'reapply', 'refresh-preview', 'open-preview', 'download-zip'],
+    });
+  }, [builderSession.user, builderSession.loading]);
+
   return (
     <HeaderProvider>
       <div className="font-sans bg-background text-foreground h-screen flex flex-col">
-      <div className="bg-white py-[15px] py-[8px] border-b border-border-faint flex items-center justify-between shadow-sm">
+      {/* ─── Ariadne's Thread [AT-0053] ─────────────────────
+          What: Execute each server-approved candidate in an isolated hidden iframe
+          Why:  Only real browser boot, DOM content, and runtime-error evidence may promote a revision
+          Date: 2026-09-30
+          Related: [AT-0048] frontend→components/app/generation/useLaunchRun.ts:runtime listener, [AT-0035] backend→cloudflare/launch-run.ts:reportRuntime
+      ───────────────────────────────────────────────────── */}
+      {builderSession.user && builderSession.user.paidPlan !== true && (
+        <BuilderPaywall
+          onClose={() => {
+            console.log('[generation] Paywall closed, returning home');
+            router.push('/');
+          }}
+        />
+      )}
+      <BuilderLoginModal
+        open={loginOpen}
+        onClose={() => {
+          console.log('[generation] Builder sign-in closed without continuing');
+          setLoginOpen(false);
+        }}
+        onSuccess={async () => {
+          setLoginOpen(false);
+          const user = await builderSession.refresh();
+          console.log('[generation] Builder sign-in completed', { userId: user?.id ?? null, paidPlan: user?.paidPlan === true });
+          if (user?.paidPlan === true) await resumeSavedBuilderRequestRef.current();
+        }}
+      />
+      {launchRun.candidateUrl && (
+        <iframe
+          key={`${launchRun.snapshot?.runId}:${launchRun.snapshot?.revision}:${launchRun.candidateUrl}`}
+          src={launchRun.candidateUrl}
+          className="fixed -left-[10000px] top-0 h-[900px] w-[1440px] border-0 opacity-0 pointer-events-none"
+          title="Candidate runtime validation"
+          sandbox="allow-scripts allow-same-origin"
+          aria-hidden="true"
+        />
+      )}
+      <div className="bg-white py-[8px] px-2 border-b border-border-faint flex items-center justify-between shadow-sm">
         <HeaderBrandKit />
         <div className="flex items-center gap-2">
+          {builderSession.user ? (
+            <button
+              type="button"
+              onClick={() => void builderSession.logout()}
+              className="max-w-40 truncate px-3 py-1.5 text-sm text-gray-700 bg-gray-50 border border-gray-200 rounded-lg hover:bg-gray-100"
+              title="Sign out"
+            >
+              {builderSession.user.displayName || builderSession.user.email}
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setLoginOpen(true)}
+              className="px-3 py-1.5 text-sm font-medium text-white bg-slate-950 rounded-lg hover:bg-slate-800"
+            >
+              Sign in
+            </button>
+          )}
+          {/* ─── Ariadne's Thread [AT-0082] ─────────────────────
+              What: Hide the model picker, new-sandbox button, and ZIP download until a Code Market session exists
+              Why:  Those controls start or export paid Builder work and should stay unavailable to anonymous visitors
+              Date: 2026-10-01
+              Related: [AT-0074] app/generation/page.tsx:sendChatMessage, [AT-0071] lib/auth/builder-session.ts:readBuilderSession
+          ───────────────────────────────────────────────────── */}
+          {builderSession.user && (
+            <>
           {/* Model Selector - Left side */}
           <select
             value={aiModel}
@@ -3292,21 +3862,40 @@ Focus on the key sections and content, making it clean and modern.`;
               setAiModel(newModel);
               const params = new URLSearchParams(searchParams);
               params.set('model', newModel);
-              if (sandboxData?.sandboxId) {
+              if (launchRun.enabled && launchRun.snapshot?.runId) {
+                params.set('run', launchRun.snapshot.runId);
+                params.delete('sandbox');
+              } else if (sandboxData?.sandboxId) {
                 params.set('sandbox', sandboxData.sandboxId);
               }
-              router.push(`/generation?${params.toString()}`);
+              router.replace(`${pathname}?${params.toString()}`);
             }}
             className="px-3 py-1.5 text-sm text-gray-900 bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:border-gray-300 transition-colors"
           >
-            {appConfig.ai.availableModels.map(model => (
-              <option key={model} value={model}>
-                {appConfig.ai.modelDisplayNames?.[model] || model}
+            {catalogModels.map(model => (
+              <option key={model.id} value={model.id}>
+                {model.name}
               </option>
             ))}
           </select>
+          {/* ─── Ariadne's Thread [AT-0054] ─────────────────────
+              What: Start a clean durable run without terminating the active candidate behind the coordinator
+              Why:  The legacy createSandbox action bypasses last-known-good protection
+              Date: 2026-09-30
+              Related: [AT-0050] app/generation/page.tsx:launch snapshot effect, [AT-0025] backend→cloudflare/launch-run.ts:LaunchRun
+          ───────────────────────────────────────────────────── */}
           <button 
-            onClick={() => createSandbox()}
+            onClick={() => {
+              if (launchRun.enabled !== false) {
+                sessionStorage.removeItem('launchRunId');
+                const params = new URLSearchParams(searchParams.toString());
+                params.delete('run');
+                params.delete('sandbox');
+                window.location.assign(`${pathname}${params.size ? `?${params.toString()}` : ''}`);
+                return;
+              }
+              void createSandbox();
+            }}
             className="p-8 rounded-lg transition-colors bg-gray-50 border border-gray-200 text-gray-700 hover:bg-gray-100"
             title="Create new sandbox"
           >
@@ -3314,6 +3903,9 @@ Focus on the key sections and content, making it clean and modern.`;
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
             </svg>
           </button>
+            </>
+          )}
+          {builderSession.user && (
           <button 
             onClick={reapplyLastGeneration}
             className="p-8 rounded-lg transition-colors bg-gray-50 border border-gray-200 text-gray-700 hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -3324,6 +3916,8 @@ Focus on the key sections and content, making it clean and modern.`;
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
             </svg>
           </button>
+          )}
+          {builderSession.user && (
           <button 
             onClick={downloadZip}
             disabled={!sandboxData}
@@ -3334,40 +3928,19 @@ Focus on the key sections and content, making it clean and modern.`;
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" />
             </svg>
           </button>
+          )}
        
         </div>
       </div>
 
-      <div className="flex-1 flex overflow-hidden">
-        {/* Center Panel - AI Chat (1/3 of remaining width) */}
-        <div className="flex-1 max-w-[400px] flex flex-col border-r border-border bg-background">
-          {/* Sidebar Input Component */}
-          {!hasInitialSubmission ? (
-            <div className="p-4 border-b border-border">
-              <SidebarInput
-                onSubmit={(url, style, model, instructions) => {
-                  // Mark that we've had an initial submission
-                  setHasInitialSubmission(true);
-                  
-                  // Store the configuration in sessionStorage (same as home page)
-                  sessionStorage.setItem('targetUrl', url);
-                  sessionStorage.setItem('selectedStyle', style);
-                  sessionStorage.setItem('selectedModel', model);
-                  if (instructions) {
-                    sessionStorage.setItem('additionalInstructions', instructions);
-                  }
-                  sessionStorage.setItem('autoStart', 'true');
-                  
-                  // Start generation using the existing logic
-                  setHomeUrlInput(url);
-                  setHomeContextInput(instructions || '');
-                  startGeneration();
-                }}
-                disabled={loading || generationProgress.isGenerating}
-              />
-            </div>
-          ) : null}
-
+      {/* ─── Ariadne's Thread [AT-0085] ─────────────────────
+          What: Stack the preview above a bottom chat on narrow screens
+          Why:  Side-by-side panes squeeze the site on a phone; the site should fill the screen and the chat stays centered at the bottom
+          Date: 2026-10-01
+          Related: [AT-0053] app/generation/page.tsx:candidate iframe, components/HeroInput.tsx:HeroInput
+      ───────────────────────────────────────────────────── */}
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden md:flex-row">
+        <div className={`order-2 flex w-full flex-col border-t border-border bg-background max-md:shrink-0 md:order-1 md:max-h-none md:min-h-0 md:max-w-[400px] md:flex-1 md:border-r md:border-t-0 ${chatMessages.length > 0 ? 'max-h-[38%] min-h-[148px]' : 'max-md:max-h-none max-md:min-h-0'}`}>
           {conversationContext.scrapedWebsites.length > 0 && (
             <div className="p-4 bg-card border-b border-gray-200">
               <div className="flex flex-col gap-4">
@@ -3386,7 +3959,9 @@ Focus on the key sections and content, making it clean and modern.`;
                         {/* eslint-disable-next-line @next/next/no-img-element */}
                         <img 
                           src={favicon} 
-                          alt={siteName}
+                          alt={PAGE_META_TITLE}
+                          title={PAGE_META_TITLE}
+                          description={PAGE_META_DESCRIPTION}
                           className="w-16 h-16 rounded"
                           onError={(e) => {
                             e.currentTarget.src = `https://www.google.com/s2/favicons?domain=${new URL(sourceURL).hostname}&sz=128`;
@@ -3437,7 +4012,9 @@ Focus on the key sections and content, making it clean and modern.`;
                             {/* eslint-disable-next-line @next/next/no-img-element */}
                             <img
                               src={screenshot}
-                              alt={`${siteName} preview`}
+                              alt={PAGE_META_TITLE}
+                              title={PAGE_META_TITLE}
+                              description={PAGE_META_DESCRIPTION}
                               className="w-full h-auto object-cover"
                               style={{ maxHeight: '200px' }}
                             />
@@ -3451,8 +4028,9 @@ Focus on the key sections and content, making it clean and modern.`;
             </div>
           )}
 
+          {chatMessages.length > 0 && (
           <div
-            className="flex-1 overflow-y-auto p-6 flex flex-col gap-4 scrollbar-hide"
+            className="min-h-0 flex-1 overflow-y-auto p-6 flex flex-col gap-4 scrollbar-hide"
             ref={chatMessagesRef}>
             {chatMessages.map((msg, idx) => {
               // Check if this message is from a successful generation
@@ -3462,11 +4040,41 @@ Focus on the key sections and content, making it clean and modern.`;
               
               // Get the files from metadata if this is a completion message
               // const completedFiles = msg.metadata?.appliedFiles || [];
-              
+              // ─── Ariadne's Thread [AT-0086] ─────────────────────
+              // What: Let visitors dismiss the Builder intro permanently so the preview iframe can use the leftover height
+              // Why:  The welcome card occupies the mobile chat strip until closed, shrinking the generated site
+              // Date: 2026-10-01
+              // Related: [AT-0085] app/generation/page.tsx:mobile chat stack, [AT-0084] app/generation/page.tsx:BUILDER_INTRO_CONTENT
+              // ─────────────────────────────────────────────────────
+
               return (
                 <div key={idx} className="block">
                   <div className={`flex ${msg.type === 'user' ? 'justify-end' : 'justify-start'}`}>
-                    <div className="block">
+                    <div className={msg.content === BUILDER_INTRO_CONTENT ? 'block w-full' : 'block'}>
+                      {msg.content === BUILDER_INTRO_CONTENT ? (
+                        <aside className="relative mt-[16px] flex w-full gap-[16px] rounded-[16px] border border-gray-200 bg-gray-50 px-[20px] py-[20px] pr-[44px]">
+                          <Image
+                            src="/assets/newsletter-founder-avatar.png"
+                            alt={PAGE_META_TITLE}
+                            title={PAGE_META_TITLE}
+                            description={PAGE_META_DESCRIPTION}
+                            width={32}
+                            height={32}
+                            className="h-[32px] w-[32px] shrink-0 rounded-full object-cover"
+                          />
+                          <p className="min-w-0 text-sm font-medium leading-relaxed text-slate-700">{BUILDER_INTRO_CONTENT}</p>
+                          <button
+                            type="button"
+                            onClick={dismissBuilderIntro}
+                            aria-label="Close welcome message"
+                            className="absolute right-[8px] top-[8px] flex h-[24px] w-[24px] items-center justify-center rounded-[8px] text-slate-400 hover:bg-slate-200 hover:text-slate-700"
+                          >
+                            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+                              <path d="M2 2L10 10M10 2L2 10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                            </svg>
+                          </button>
+                        </aside>
+                      ) : (
                       <div className={`block rounded-[10px] px-14 py-8 ${
                         msg.type === 'user' ? 'bg-[#36322F] text-white ml-auto max-w-[80%]' :
                         msg.type === 'ai' ? 'bg-gray-100 text-gray-900 mr-auto max-w-[80%]' :
@@ -3506,7 +4114,8 @@ Focus on the key sections and content, making it clean and modern.`;
                       <span className="text-sm">{msg.content}</span>
                     )}
                       </div>
-                  
+                      )}
+
                       {/* Show branding data if this is a brand extraction message */}
                       {msg.metadata?.brandingData && (
                         <div className="mt-3 bg-gradient-to-br from-gray-50 to-white border-2 border-gray-200 rounded-xl overflow-hidden max-w-[500px] shadow-sm">
@@ -3514,7 +4123,9 @@ Focus on the key sections and content, making it clean and modern.`;
                             <div className="flex items-center gap-8">
                               <Image
                                 src={`https://www.google.com/s2/favicons?domain=${msg.metadata.sourceUrl}&sz=32`}
-                                alt=""
+                                alt={PAGE_META_TITLE}
+                                title={PAGE_META_TITLE}
+                                description={PAGE_META_DESCRIPTION}
                                 width={64}
                                 height={64}
                                 className="w-16 h-16"
@@ -3844,8 +4455,9 @@ Focus on the key sections and content, making it clean and modern.`;
               </div>
             )}
           </div>
+          )}
 
-          <div className="p-4 border-t border-border bg-background-base">
+          <div className="mx-auto mt-auto w-full max-w-[420px] shrink-0 border-t border-border bg-background-base p-4">
             <HeroInput
               value={aiChatInput}
               onChange={setAiChatInput}
@@ -3857,76 +4469,22 @@ Focus on the key sections and content, making it clean and modern.`;
         </div>
 
         {/* Right Panel - Preview or Generation (2/3 of remaining width) */}
-        <div className="flex-1 flex flex-col overflow-hidden">
-          <div className="px-3 pt-4 pb-4 bg-white border-b border-gray-200 flex justify-between items-center">
+        <div className="order-1 flex min-h-0 w-full flex-1 flex-col overflow-hidden md:order-2">
+          <div className="flex items-center justify-end border-b border-gray-200 bg-white px-3 pb-4 pt-4">
             <div className="flex items-center gap-2">
-              {/* Toggle-style Code/View switcher */}
-              <div className="inline-flex bg-gray-100 border border-gray-200 rounded-md p-0.5">
-                <button
-                  onClick={() => setActiveTab('generation')}
-                  className={`px-3 py-1 rounded transition-all text-xs font-medium ${
-                    activeTab === 'generation' 
-                      ? 'bg-white text-gray-900 shadow-sm' 
-                      : 'bg-transparent text-gray-600 hover:text-gray-900'
-                  }`}
-                >
-                  <div className="flex items-center gap-1.5">
-                    <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
-                    </svg>
-                    <span>Code</span>
-                  </div>
-                </button>
-                <button
-                  onClick={() => setActiveTab('preview')}
-                  className={`px-3 py-1 rounded transition-all text-xs font-medium ${
-                    activeTab === 'preview' 
-                      ? 'bg-white text-gray-900 shadow-sm' 
-                      : 'bg-transparent text-gray-600 hover:text-gray-900'
-                  }`}
-                >
-                  <div className="flex items-center gap-1.5">
-                    <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                    </svg>
-                    <span>View</span>
-                  </div>
-                </button>
-              </div>
-            </div>
-            <div className="flex gap-2 items-center">
-              {/* Files generated count */}
-              {activeTab === 'generation' && !generationProgress.isEdit && generationProgress.files.length > 0 && (
-                <div className="text-gray-500 text-xs font-medium">
-                  {generationProgress.files.length} files generated
-                </div>
-              )}
-              
-              {/* Live Code Generation Status */}
-              {activeTab === 'generation' && generationProgress.isGenerating && (
-                <div className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-gray-100 border border-gray-200 rounded-md text-xs font-medium text-gray-700">
-                  <div className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse" />
-                  {generationProgress.isEdit ? 'Editing code' : 'Live generation'}
-                </div>
-              )}
-              
-              {/* Sandbox Status Indicator */}
               {sandboxData && (
-                <div className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-gray-100 border border-gray-200 rounded-md text-xs font-medium text-gray-700">
-                  <div className="w-1.5 h-1.5 bg-green-500 rounded-full" />
+                <div className="inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-700">
+                  <div className="h-1.5 w-1.5 rounded-full bg-green-500" />
                   Sandbox active
                 </div>
               )}
-              
-              {/* Open in new tab button */}
-              {sandboxData && (
+              {sandboxData && builderSession.user && (
                 <a 
                   href={sandboxData.url} 
                   target="_blank" 
                   rel="noopener noreferrer"
                   title="Open in new tab"
-                  className="p-1.5 rounded-md transition-all text-gray-600 hover:text-gray-900 hover:bg-gray-100"
+                  className="rounded-md p-1.5 text-gray-600 transition-all hover:bg-gray-100 hover:text-gray-900"
                 >
                   <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />

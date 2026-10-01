@@ -74,10 +74,11 @@ const themeConfig: Config = {
       },
     },
     extend: {
+      // [AT-0061] Keep all font utilities on bundled Geist assets so builds remain network-independent.
       fontFamily: {
-        sans: ["var(--font-geist-sans)", "var(--font-inter)", ...defaultTheme.fontFamily.sans],
+        sans: ["var(--font-geist-sans)", ...defaultTheme.fontFamily.sans],
         mono: ["var(--font-geist-mono)", ...defaultTheme.fontFamily.mono],
-        ascii: ["var(--font-roboto-mono)", ...defaultTheme.fontFamily.mono]
+        ascii: ["var(--font-geist-mono)", ...defaultTheme.fontFamily.mono]
       },
       fontSize: {
         "title-h1": [

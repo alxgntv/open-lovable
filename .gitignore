@@ -20,6 +20,7 @@
 
 # production
 /build
+/data/builder-orders.jsonl
 
 # misc
 .DS_Store
@@ -41,6 +42,7 @@ yarn-error.log*
 
 # wrangler
 .wrangler/
+.dev.vars
 
 # typescript
 *.tsbuildinfo

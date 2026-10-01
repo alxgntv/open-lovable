@@ -7,7 +7,7 @@ export interface SandboxFile {
 export interface SandboxInfo {
   sandboxId: string;
   url: string;
-  provider: 'e2b' | 'vercel';
+  provider: 'e2b' | 'vercel' | 'cloudflare';
   createdAt: Date;
 }
 
@@ -29,6 +29,10 @@ export interface SandboxProviderConfig {
     projectId?: string;
     token?: string;
     authMethod?: 'oidc' | 'pat';
+  };
+  cloudflare?: {
+    workerUrl?: string;
+    secret?: string;
   };
 }
 

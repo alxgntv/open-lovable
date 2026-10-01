@@ -3,11 +3,10 @@
 import copy from "copy-to-clipboard";
 import { animate, cubicBezier } from "motion";
 import { AnimatePresence, motion } from "motion/react";
+import Image from "next/image";
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import FirecrawlIcon from "@/components/shared/firecrawl-icon/firecrawl-icon";
-import Logo from "@/components/shared/header/_svg/Logo";
 import { useHeaderContext } from "@/components/shared/header/HeaderContext";
 import { cn } from "@/utils/cn";
 
@@ -45,8 +44,22 @@ export default function HeaderBrandKit() {
           }
         }}
       >
-        <FirecrawlIcon className="size-28 -top-2 relative" />
-        <Logo />
+        {/* ─── Ariadne's Thread [AT-0004] ─────────────────────
+            What: Header mark matches the code.market lockup
+            Why:  Replace the Firecrawl flame with the {C} badge and wordmark
+            Date: 2026-09-30
+            Related: app/layout.tsx:metadata
+            ───────────────────────────────────────────────────── */}
+        <Image
+          src="/codemarket-logo.png"
+          alt="Code Market"
+          title="Code Market"
+          description="Re-imagine any website in seconds with AI-powered website builder."
+          width={40}
+          height={40}
+          className="h-40 w-40 shrink-0 object-cover"
+        />
+        <span className="hidden text-lg font-semibold text-gray-900 lg:inline">code.market</span>
       </Link>
 
       <AnimatePresence initial={false} mode="popLayout">
