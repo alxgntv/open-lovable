@@ -1,5 +1,12 @@
 import { DurableObject } from 'cloudflare:workers';
 import {
+  listComposerDrafts as readComposerDraftRows,
+  saveComposerDraft as writeComposerDraftRow,
+  type ComposerDraftRecord,
+  type ComposerDraftSql,
+  type ComposerDraftWrite,
+} from '../lib/launch/composer-drafts';
+import {
   assertPromptOwner,
   listStoredPrompts,
   recordInitialPrompt,
@@ -28,6 +35,23 @@ export class BuilderPromptStore extends DurableObject {
     nextCursor: string | null;
   }> {
     return listStoredPrompts(this.storage(), cursor, limit);
+  }
+
+  async saveComposerDraft(input: ComposerDraftWrite): Promise<ComposerDraftRecord> {
+    return writeComposerDraftRow(this.draftSql(), input);
+  }
+
+  async listComposerDrafts(limit: number): Promise<ComposerDraftRecord[]> {
+    return readComposerDraftRows(this.draftSql(), limit);
+  }
+
+  private draftSql(): ComposerDraftSql {
+    const storage = this.ctx.storage as { sql?: ComposerDraftSql };
+    if (!storage.sql) {
+      console.error('[builder-prompt-store] SQLite database is not enabled for composer drafts');
+      throw new Error('Builder sqlite database is not enabled');
+    }
+    return storage.sql;
   }
 
   private storage(): PromptLedgerStorage {

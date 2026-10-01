@@ -13,6 +13,7 @@ const PAGE_META_TITLE = 'Code Market';
 const PAGE_META_DESCRIPTION = 'Re-imagine any website in seconds with AI-powered website builder.';
 const BUILDER_HREF = '/generation';
 const COMPOSER_DRAFT_KEY = 'builderComposerDraft';
+const COMPOSER_DRAFT_ID_KEY = 'builderComposerDraftId';
 
 function readComposerDraft(): string {
   if (typeof window === 'undefined') return '';
@@ -32,6 +33,40 @@ function readComposerDraft(): string {
 // Date: 2026-10-01
 // Related: [AT-0091] frontend→components/app/home/ProjectHome.tsx:openBuilder
 // ─────────────────────────────────────────────────────
+function composerDraftId(): string {
+  const existing = window.localStorage.getItem(COMPOSER_DRAFT_ID_KEY) || '';
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(existing)) {
+    return existing;
+  }
+  const id = crypto.randomUUID();
+  window.localStorage.setItem(COMPOSER_DRAFT_ID_KEY, id);
+  console.log('[project-home] Created composer draft id', { id });
+  return id;
+}
+
+function persistComposerDraft(text: string): void {
+  const id = composerDraftId();
+  console.log('[project-home] Saving composer text to the database', { id, textChars: text.length });
+  void fetch('/api/composer-drafts', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id, text }),
+    keepalive: true,
+  }).then(async (response) => {
+    if (!response.ok) {
+      console.error('[project-home] Composer database save failed', { id, status: response.status });
+      return;
+    }
+    console.log('[project-home] Composer text stored in the database', { id, textChars: text.length });
+  }).catch((error) => {
+    console.error('[project-home] Composer database save failed', {
+      id,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
+}
+
 function writeComposerDraft(value: string): void {
   if (typeof window === 'undefined') return;
   try {
@@ -339,6 +374,7 @@ export default function ProjectHome() {
   sessionRef.current = builderSession;
   const pendingHrefRef = useRef<string | null>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const composerDirtyRef = useRef(false);
   const [loginOpen, setLoginOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [paywallOpen, setPaywallOpen] = useState(false);
@@ -369,6 +405,24 @@ export default function ProjectHome() {
     setComposerPrompt(draft);
     console.log('[project-home] Restored composer draft before sign-in', { chars: draft.length });
   }, []);
+
+  // ─── Ariadne's Thread [AT-0102] ─────────────────────
+  // What: Write each home composer change into the Builder database
+  // Why:  localStorage alone cannot show what visitors typed
+  // Date: 2026-10-01
+  // Related: [AT-0101] backend→app/api/composer-drafts/route.ts:POST, [AT-0094] frontend→components/app/home/ProjectHome.tsx:writeComposerDraft
+  // ─────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!composerDirtyRef.current) return;
+    const text = composerPrompt;
+    const handle = window.setTimeout(() => persistComposerDraft(text), 400);
+    const flush = () => persistComposerDraft(text);
+    window.addEventListener('pagehide', flush);
+    return () => {
+      window.clearTimeout(handle);
+      window.removeEventListener('pagehide', flush);
+    };
+  }, [composerPrompt]);
 
   useEffect(() => {
     console.log('[project-home] Code Market home mounted', {
@@ -414,6 +468,7 @@ export default function ProjectHome() {
   };
 
   const rememberComposerPrompt = (value: string) => {
+    composerDirtyRef.current = true;
     setComposerPrompt(value);
     writeComposerDraft(value);
   };

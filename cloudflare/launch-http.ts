@@ -1,5 +1,6 @@
 import type { LaunchRun, StartLaunchInput } from './launch-run';
 import type { BuilderPromptStore } from './builder-prompt-store';
+import { parseComposerDraftWrite } from '../lib/launch/composer-drafts';
 import {
   PromptLedgerConflict,
   PromptOwnershipError,
@@ -132,6 +133,35 @@ export async function routeLaunchRequest(
       ? `/candidate/${previewMatch[3]}${previewMatch[4] || '/'}`
       : `/preview${previewMatch[4] || '/'}`;
     return env.LAUNCH_RUN.getByName(runId).fetch(proxyRequest(request, route));
+  }
+
+  // ─── Ariadne's Thread [AT-0100] ─────────────────────
+  // What: Accept home composer drafts into the Builder sqlite database
+  // Why:  The textarea text must be stored before sign-in, and only the Worker can write that database
+  // Date: 2026-10-01
+  // Related: [AT-0099] shared→lib/launch/composer-drafts.ts:saveComposerDraft, [AT-0026] infra→cloudflare/launch-http.ts:routeLaunchRequest
+  // ─────────────────────────────────────────────────────
+  if (url.pathname === '/composer-drafts') {
+    if (!authorize(request, env)) {
+      console.warn('[launch-http] Rejected composer draft request without a valid secret');
+      return new Response('Unauthorized', { status: 401 });
+    }
+    const store = env.BUILDER_PROMPTS.getByName('builder-prompts');
+    if (request.method === 'GET') {
+      const limit = Number(url.searchParams.get('limit') || 50);
+      const drafts = await store.listComposerDrafts(limit);
+      console.log('[launch-http] Composer drafts listed', { count: drafts.length });
+      return Response.json({ success: true, drafts });
+    }
+    if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
+    const input = parseComposerDraftWrite(await request.json().catch(() => null));
+    if (!input) return Response.json({ success: false, error: 'Invalid composer draft.' }, { status: 400 });
+    const draft = await store.saveComposerDraft(input);
+    console.log('[launch-http] Composer draft stored', { id: draft.id, textChars: draft.text.length });
+    return Response.json({
+      success: true,
+      draft: { id: draft.id, createdAt: draft.createdAt, updatedAt: draft.updatedAt, textChars: draft.text.length },
+    });
   }
 
   if (url.pathname !== '/launch-runs' && !url.pathname.startsWith('/launch-runs/')) {
