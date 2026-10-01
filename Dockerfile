@@ -14,6 +14,8 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
+ENV NEXT_PUBLIC_POSTHOG_KEY=phc_v4RMiHpzEs9WpXfJrcSuSAe5h3zDCYLPoNGgBBBbXKXD
+ENV NEXT_PUBLIC_POSTHOG_HOST=https://us.i.posthog.com
 RUN npm run build
 
 FROM node:22-bookworm-slim AS runner

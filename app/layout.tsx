@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import localFont from "next/font/local";
+import BuilderConsent from "@/components/analytics/BuilderConsent";
 import "./globals.css";
 
 // ─── Ariadne's Thread [AT-0061] ─────────────────────
@@ -34,6 +35,7 @@ export default function RootLayout({
     <html lang="en">
       <body className={`${geistSans.variable} ${geistMono.variable} font-sans`}>
         {children}
+        <BuilderConsent />
       </body>
     </html>
   );
