@@ -23,10 +23,6 @@ const geistMono = localFont({
 export const metadata: Metadata = {
   title: "Code Market",
   description: "Re-imagine any website in seconds with AI-powered website builder.",
-  icons: {
-    icon: "/codemarket-logo.png",
-    shortcut: "/codemarket-logo.png",
-  },
 };
 
 export default function RootLayout({
