@@ -402,6 +402,7 @@ export default function ProjectHome() {
   useEffect(() => {
     const draft = readComposerDraft();
     if (!draft) return;
+    composerDirtyRef.current = true;
     setComposerPrompt(draft);
     console.log('[project-home] Restored composer draft before sign-in', { chars: draft.length });
   }, []);
