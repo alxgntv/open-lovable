@@ -1,31 +1,14 @@
-import { randomUUID } from 'crypto';
-import { appendFile, mkdir } from 'fs/promises';
-import path from 'path';
 import { NextRequest, NextResponse } from 'next/server';
 import { readBuilderSession } from '@/lib/auth/builder-session';
-import { builderPlanAmountCents, isBuilderPlanId } from '@/lib/billing/builder-plans';
+import { launchWorkerFetch } from '@/lib/launch/worker-client';
 
 export const dynamic = 'force-dynamic';
 
-const ORDERS_FILE = path.join(process.cwd(), 'data', 'builder-orders.jsonl');
-
-interface BuilderOrder {
-  id: string;
-  userId: string;
-  email: string;
-  planId: string;
-  interval: 'month' | 'year';
-  amountCents: number;
-  currency: 'usd';
-  status: 'pending';
-  createdAt: string;
-}
-
-// ─── Ariadne's Thread [AT-0096] ─────────────────────
-// What: Record a pending builder plan order when Choose is clicked
-// Why:  The paywall must create an order on this backend before any later payment step
-// Date: 2026-10-01
-// Related: [AT-0071] lib/auth/builder-session.ts:readBuilderSession, [AT-0093] frontend→components/app/home/BuilderPaywall.tsx:BuilderPaywall
+// ─── Ariadne's Thread [AT-0106] ─────────────────────
+// What: Save a pending plan order in the Builder sqlite database
+// Why:  The container file could not be read, so Choose clicks never showed up with the drafts
+// Date: 2026-10-05
+// Related: [AT-0105] shared→lib/launch/builder-orders.ts:saveBuilderOrder, [AT-0093] frontend→components/app/home/BuilderPaywall.tsx:choosePlan
 // ─────────────────────────────────────────────────────
 export async function POST(request: NextRequest) {
   const session = await readBuilderSession(request);
@@ -41,43 +24,39 @@ export async function POST(request: NextRequest) {
   const body = await request.json().catch(() => ({})) as { planId?: unknown; annual?: unknown };
   const planId = typeof body.planId === 'string' ? body.planId : '';
   const annual = body.annual === true;
-  if (!isBuilderPlanId(planId)) {
-    console.warn('[builder-orders] Rejected unknown plan', { planId });
-    return NextResponse.json({ success: false, error: 'Unknown plan.' }, { status: 400 });
-  }
-
-  const order: BuilderOrder = {
-    id: `ord_${randomUUID()}`,
+  console.log('[builder-orders] Creating sqlite order', {
     userId: session.user.id,
-    email: session.user.email,
     planId,
-    interval: annual ? 'year' : 'month',
-    amountCents: builderPlanAmountCents(planId, annual),
-    currency: 'usd',
-    status: 'pending',
-    createdAt: new Date().toISOString(),
-  };
-
-  await mkdir(path.dirname(ORDERS_FILE), { recursive: true });
-  await appendFile(ORDERS_FILE, `${JSON.stringify(order)}\n`, 'utf8');
-  console.log('[builder-orders] Pending order created', {
-    orderId: order.id,
-    userId: order.userId,
-    planId: order.planId,
-    interval: order.interval,
-    amountCents: order.amountCents,
+    annual,
   });
 
-  return NextResponse.json({
-    success: true,
-    order: {
-      id: order.id,
-      planId: order.planId,
-      interval: order.interval,
-      amountCents: order.amountCents,
-      currency: order.currency,
-      status: order.status,
-      createdAt: order.createdAt,
-    },
-  });
+  try {
+    const response = await launchWorkerFetch('/builder-orders', {
+      method: 'POST',
+      body: JSON.stringify({
+        userId: session.user.id,
+        email: session.user.email,
+        planId,
+        annual,
+      }),
+    }, 8_000);
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      console.error('[builder-orders] Worker rejected order', {
+        userId: session.user.id,
+        planId,
+        status: response.status,
+      });
+      return NextResponse.json({ success: false, error: 'Could not create the order.' }, { status: 502 });
+    }
+    console.log('[builder-orders] Sqlite order created', { userId: session.user.id, planId, payload });
+    return NextResponse.json(payload);
+  } catch (error) {
+    console.error('[builder-orders] Worker request failed', {
+      userId: session.user.id,
+      planId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return NextResponse.json({ success: false, error: 'Could not create the order.' }, { status: 503 });
+  }
 }

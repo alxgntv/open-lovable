@@ -1,5 +1,6 @@
 import type { LaunchRun, StartLaunchInput } from './launch-run';
 import type { BuilderPromptStore } from './builder-prompt-store';
+import { parseBuilderOrderWrite } from '../lib/launch/builder-orders';
 import { parseComposerDraftWrite } from '../lib/launch/composer-drafts';
 import {
   PromptLedgerConflict,
@@ -161,6 +162,48 @@ export async function routeLaunchRequest(
     return Response.json({
       success: true,
       draft: { id: draft.id, createdAt: draft.createdAt, updatedAt: draft.updatedAt, textChars: draft.text.length },
+    });
+  }
+
+  // ─── Ariadne's Thread [AT-0107] ─────────────────────
+  // What: Store Choose clicks in the Builder sqlite database
+  // Why:  Plan orders must be listed the same way composer drafts are listed
+  // Date: 2026-10-05
+  // Related: [AT-0105] shared→lib/launch/builder-orders.ts:saveBuilderOrder, [AT-0100] infra→cloudflare/launch-http.ts:routeLaunchRequest
+  // ─────────────────────────────────────────────────────
+  if (url.pathname === '/builder-orders') {
+    if (!authorize(request, env)) {
+      console.warn('[launch-http] Rejected builder order request without a valid secret');
+      return new Response('Unauthorized', { status: 401 });
+    }
+    const store = env.BUILDER_PROMPTS.getByName('builder-prompts');
+    if (request.method === 'GET') {
+      const limit = Number(url.searchParams.get('limit') || 50);
+      const orders = await store.listBuilderOrders(limit);
+      console.log('[launch-http] Builder orders listed', { count: orders.length });
+      return Response.json({ success: true, orders });
+    }
+    if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
+    const input = parseBuilderOrderWrite(await request.json().catch(() => null));
+    if (!input) return Response.json({ success: false, error: 'Invalid builder order.' }, { status: 400 });
+    const order = await store.saveBuilderOrder(input);
+    console.log('[launch-http] Builder order stored', {
+      orderId: order.id,
+      userId: order.userId,
+      planId: order.planId,
+      amountCents: order.amountCents,
+    });
+    return Response.json({
+      success: true,
+      order: {
+        id: order.id,
+        planId: order.planId,
+        interval: order.interval,
+        amountCents: order.amountCents,
+        currency: order.currency,
+        status: order.status,
+        createdAt: order.createdAt,
+      },
     });
   }
 
