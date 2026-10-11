@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { readBuilderSession } from '@/lib/auth/builder-session';
+import { isBuilderPlanId } from '@/lib/billing/builder-plans';
+import { createBuilderCheckoutSession } from '@/lib/billing/stripe-checkout';
 import { launchWorkerFetch } from '@/lib/launch/worker-client';
 
 export const dynamic = 'force-dynamic';
@@ -24,6 +26,17 @@ export async function POST(request: NextRequest) {
   const body = await request.json().catch(() => ({})) as { planId?: unknown; annual?: unknown };
   const planId = typeof body.planId === 'string' ? body.planId : '';
   const annual = body.annual === true;
+  if (annual) {
+    console.warn('[builder-orders] Rejected annual checkout because no annual Stripe price exists', {
+      userId: session.user.id,
+      planId,
+    });
+    return NextResponse.json({ success: false, error: 'Annual billing is not available yet.' }, { status: 400 });
+  }
+  if (!isBuilderPlanId(planId)) {
+    console.warn('[builder-orders] Rejected unknown plan', { planId });
+    return NextResponse.json({ success: false, error: 'Unknown plan.' }, { status: 400 });
+  }
   console.log('[builder-orders] Creating sqlite order', {
     userId: session.user.id,
     planId,
@@ -40,8 +53,12 @@ export async function POST(request: NextRequest) {
         annual,
       }),
     }, 8_000);
-    const payload = await response.json().catch(() => null);
-    if (!response.ok) {
+    const payload = await response.json().catch(() => null) as {
+      success?: boolean;
+      order?: { id?: string; planId?: string };
+    } | null;
+    const orderId = payload?.order?.id || '';
+    if (!response.ok || !orderId) {
       console.error('[builder-orders] Worker rejected order', {
         userId: session.user.id,
         planId,
@@ -49,8 +66,15 @@ export async function POST(request: NextRequest) {
       });
       return NextResponse.json({ success: false, error: 'Could not create the order.' }, { status: 502 });
     }
-    console.log('[builder-orders] Sqlite order created', { userId: session.user.id, planId, payload });
-    return NextResponse.json(payload);
+    const checkoutUrl = await createBuilderCheckoutSession({
+      orderId,
+      userId: session.user.id,
+      email: session.user.email,
+      planId,
+      origin: request.nextUrl.origin,
+    });
+    console.log('[builder-orders] Sqlite order created', { userId: session.user.id, planId, orderId });
+    return NextResponse.json({ success: true, checkoutUrl, order: payload?.order });
   } catch (error) {
     console.error('[builder-orders] Worker request failed', {
       userId: session.user.id,

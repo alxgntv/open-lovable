@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   listBuilderOrders,
+  markBuilderOrderPaid,
   parseBuilderOrderWrite,
   saveBuilderOrder,
+  userHasPaidBuilderOrder,
 } from '../../lib/launch/builder-orders';
 import type { ComposerDraftSql } from '../../lib/launch/composer-drafts';
 
@@ -26,6 +28,18 @@ class MemoryOrderSql implements ComposerDraftSql {
         created_at: String(createdAt),
       });
       return [];
+    }
+    if (sql.startsWith('SELECT id, status')) {
+      const row = this.rows.find((item) => item.id === String(bindings[0]));
+      return row ? [row] : [];
+    }
+    if (sql.startsWith('UPDATE')) {
+      const row = this.rows.find((item) => item.id === String(bindings[1]));
+      if (row) row.status = String(bindings[0]);
+      return [];
+    }
+    if (sql.includes('WHERE user_id')) {
+      return this.rows.filter((item) => item.user_id === String(bindings[0]) && item.status === String(bindings[1])).slice(0, 1);
     }
     if (sql.startsWith('SELECT id')) {
       const limit = Number(bindings[0]);
@@ -56,5 +70,8 @@ describe('builder orders sqlite', () => {
     expect(listed).toHaveLength(1);
     expect(listed[0]?.userId).toBe('111776');
     expect(listed[0]?.planId).toBe('credits-350');
+    expect(userHasPaidBuilderOrder(sql, '111776')).toBe(false);
+    expect(markBuilderOrderPaid(sql, order.id)).toBe(true);
+    expect(userHasPaidBuilderOrder(sql, '111776')).toBe(true);
   });
 });

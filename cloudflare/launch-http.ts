@@ -178,10 +178,26 @@ export async function routeLaunchRequest(
     }
     const store = env.BUILDER_PROMPTS.getByName('builder-prompts');
     if (request.method === 'GET') {
+      const userId = url.searchParams.get('userId') || '';
+      if (/^\d+$/.test(userId)) {
+        const paid = await store.userHasPaidBuilderOrder(userId);
+        console.log('[launch-http] Builder paid-order lookup', { userId, paid });
+        return Response.json({ success: true, paid });
+      }
       const limit = Number(url.searchParams.get('limit') || 50);
       const orders = await store.listBuilderOrders(limit);
       console.log('[launch-http] Builder orders listed', { count: orders.length });
       return Response.json({ success: true, orders });
+    }
+    if (url.pathname === '/builder-orders' && request.method === 'PATCH') {
+      const body = await request.json().catch(() => null) as { orderId?: unknown } | null;
+      const orderId = typeof body?.orderId === 'string' ? body.orderId.trim() : '';
+      if (!orderId.startsWith('ord_')) {
+        console.warn('[launch-http] Rejected paid update without an order id');
+        return Response.json({ success: false, error: 'Invalid order.' }, { status: 400 });
+      }
+      const paid = await store.markBuilderOrderPaid(orderId);
+      return Response.json({ success: paid }, { status: paid ? 200 : 404 });
     }
     if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
     const input = parseBuilderOrderWrite(await request.json().catch(() => null));

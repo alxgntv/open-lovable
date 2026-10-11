@@ -7,7 +7,7 @@ const PRICING_HREF = 'https://code.market/pricing';
 const PLANS = [
   {
     id: 'membership',
-    price: '$14.50',
+    price: '$14.05',
     tone: 'border-white/15 bg-[#1a1f27]',
     features: [
       '100 credits',
@@ -32,7 +32,7 @@ const PLANS = [
       'Development sandbox',
       'Download source code',
       'GitHub integration',
-      'Everything in the $14.50 plan',
+      'Everything in the $14.05 plan',
       'Team workspace',
       'Role-based access',
       'Personal projects',
@@ -89,14 +89,20 @@ export default function BuilderPaywall({ onClose }: { onClose: () => void }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ planId, annual }),
       });
-      const payload = await response.json().catch(() => ({})) as { success?: boolean; error?: string; order?: { id?: string } };
-      if (!response.ok || !payload.success) {
+      const payload = await response.json().catch(() => ({})) as {
+        success?: boolean;
+        error?: string;
+        checkoutUrl?: string;
+        order?: { id?: string };
+      };
+      if (!response.ok || !payload.success || !payload.checkoutUrl) {
         const message = payload.error || 'Could not create the order.';
         console.error('[paywall] Builder order failed', { planId, status: response.status, message });
         setOrderError({ planId, message });
         return;
       }
-      console.log('[paywall] Builder order created', { planId, orderId: payload.order?.id ?? null });
+      console.log('[paywall] Redirecting to Stripe Checkout', { planId, orderId: payload.order?.id ?? null });
+      window.location.assign(payload.checkoutUrl);
     } catch (error) {
       console.error('[paywall] Builder order request failed', error);
       setOrderError({ planId, message: 'Could not create the order.' });

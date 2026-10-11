@@ -1,7 +1,9 @@
 import { DurableObject } from 'cloudflare:workers';
 import {
   listBuilderOrders as readBuilderOrderRows,
+  markBuilderOrderPaid as markBuilderOrderPaidRow,
   saveBuilderOrder as writeBuilderOrderRow,
+  userHasPaidBuilderOrder as userHasPaidBuilderOrderRow,
   type BuilderOrderRecord,
   type BuilderOrderWrite,
 } from '../lib/launch/builder-orders';
@@ -57,6 +59,14 @@ export class BuilderPromptStore extends DurableObject {
 
   async listBuilderOrders(limit: number): Promise<BuilderOrderRecord[]> {
     return readBuilderOrderRows(this.draftSql(), limit);
+  }
+
+  async markBuilderOrderPaid(orderId: string): Promise<boolean> {
+    return markBuilderOrderPaidRow(this.draftSql(), orderId);
+  }
+
+  async userHasPaidBuilderOrder(userId: string): Promise<boolean> {
+    return userHasPaidBuilderOrderRow(this.draftSql(), userId);
   }
 
   private draftSql(): ComposerDraftSql {

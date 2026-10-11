@@ -9,7 +9,7 @@ export interface BuilderOrderRecord {
   interval: 'month' | 'year';
   amountCents: number;
   currency: 'usd';
-  status: 'pending';
+  status: 'pending' | 'paid';
   createdAt: string;
 }
 
@@ -113,7 +113,7 @@ export function listBuilderOrders(sql: ComposerDraftSql, limit: number): Builder
     const interval = textValue(row.interval);
     const status = textValue(row.status);
     const currency = textValue(row.currency);
-    if (!isBuilderPlanId(planId) || (interval !== 'month' && interval !== 'year') || status !== 'pending' || currency !== 'usd') {
+    if (!isBuilderPlanId(planId) || (interval !== 'month' && interval !== 'year') || (status !== 'pending' && status !== 'paid') || currency !== 'usd') {
       console.warn('[builder-orders] Skipping unreadable order row', { id: textValue(row.id), planId, interval, status });
       return [];
     }
@@ -125,10 +125,34 @@ export function listBuilderOrders(sql: ComposerDraftSql, limit: number): Builder
       interval,
       amountCents: Number(row.amount_cents),
       currency,
-      status,
+      status: status as 'pending' | 'paid',
       createdAt: textValue(row.created_at),
     } satisfies BuilderOrderRecord];
   });
   console.log('[builder-orders] Listed sqlite orders', { count: orders.length, limit: bounded });
   return orders;
+}
+
+export function markBuilderOrderPaid(sql: ComposerDraftSql, orderId: string): boolean {
+  ensureBuilderOrdersTable(sql);
+  const existing = [...sql.exec('SELECT id, status FROM builder_orders WHERE id = ?', orderId)];
+  if (!existing[0]) {
+    console.warn('[builder-orders] Paid webhook missed the order', { orderId });
+    return false;
+  }
+  sql.exec('UPDATE builder_orders SET status = ? WHERE id = ?', 'paid', orderId);
+  console.log('[builder-orders] Order marked paid', { orderId, previousStatus: textValue(existing[0].status) });
+  return true;
+}
+
+export function userHasPaidBuilderOrder(sql: ComposerDraftSql, userId: string): boolean {
+  ensureBuilderOrdersTable(sql);
+  const rows = [...sql.exec(
+    'SELECT id FROM builder_orders WHERE user_id = ? AND status = ? LIMIT 1',
+    userId,
+    'paid',
+  )];
+  const paid = rows.length > 0;
+  console.log('[builder-orders] Paid order lookup', { userId, paid });
+  return paid;
 }
